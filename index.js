@@ -1115,6 +1115,73 @@ app.delete('/api/reports/:sessionId', async (req, res) => {
   }
 })
 
+let agentsModulePromise = null
+let qaAgentInstance = null
+
+const loadAgentsModule = async () => {
+  if (!agentsModulePromise) {
+    agentsModulePromise = import('@openai/agents')
+  }
+  return agentsModulePromise
+}
+
+const getQaAgent = async () => {
+  const { Agent } = await loadAgentsModule()
+  if (!qaAgentInstance) {
+    qaAgentInstance = new Agent({
+      name: 'iKapitalist Assistant',
+      instructions: `
+        Ты виртуальный аналитик iKapitalist. Отвечай на вопросы пользователей про процесс анализа выписок,
+        загрузку документов, статусы отчётов и работу платформы. Отвечай кратко и по делу, на русском языке.
+        Если тебя просят сделать что-то, что доступно только в интерфейсе (например, загрузить файлы или удалить отчёт),
+        объясни пользователю, как это сделать в приложении. Если не знаешь ответ, честно признайся и предложи проверить
+        актуальную информацию в интерфейсе или обратиться в поддержку iKapitalist.
+      `.trim(),
+    })
+  }
+  return qaAgentInstance
+}
+
+const runQaAgent = async (prompt, options = {}) => {
+  const { run } = await loadAgentsModule()
+  const agent = await getQaAgent()
+  const result = await run(agent, prompt, options)
+  return result
+}
+
+app.post('/api/agent/query', async (req, res) => {
+  if (!OPENAI_API_KEY) {
+    return res.status(503).json({ ok: false, message: 'OpenAI API ключ не настроен на сервере.' })
+  }
+
+  const { question, options } = req.body || {}
+  const prompt = typeof question === 'string' ? question.trim() : ''
+
+  if (!prompt) {
+    return res.status(400).json({ ok: false, message: 'Введите вопрос для агента.' })
+  }
+
+  try {
+    const result = await runQaAgent(prompt, options)
+    return res.json({
+      ok: true,
+      answer: result.finalOutput ?? '',
+      finalAgent: result.finalAgent ? result.finalAgent.name || result.finalAgent : qaAgentInstance?.name,
+      history: result.history ?? [],
+    })
+  } catch (error) {
+    console.error('❌ Ошибка обращения к агенту', {
+      prompt,
+      error: error?.message || error,
+    })
+    const message =
+      error?.status === 401
+        ? 'Недостаточно прав для выполнения запроса к OpenAI. Проверьте ключ.'
+        : error?.message || 'Не удалось получить ответ от агента.'
+    return res.status(500).json({ ok: false, message })
+  }
+})
+
 if (process.env.NODE_ENV === 'production') {
   app.get(/^\/(?!api\/).*$/, (_req, res) => {
     res.sendFile(path.join(frontendDistPath, 'index.html'))
