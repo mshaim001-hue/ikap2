@@ -25,6 +25,7 @@ console.log('Agents SDK loaded successfully')
 const app = express()
 
 const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS || 1200000)
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY
 
 // Настройка CORS для GitHub Pages
 const allowedOrigins = [
@@ -346,11 +347,36 @@ const appendAssistantMessage = async (sessionId, text) => {
   }
 }
 
+const listOpenAIResponses = async (limit = 20) => {
+  if (!OPENAI_API_KEY) {
+    throw new Error('OPENAI_API_KEY is not set')
+  }
+
+  const url = new URL('https://api.openai.com/v1/responses')
+  url.searchParams.set('limit', String(limit))
+
+  const response = await fetch(url, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+  })
+
+  if (!response.ok) {
+    const body = await response.text()
+    throw new Error(`Failed to list responses: ${response.status} ${body}`)
+  }
+
+  const data = await response.json()
+  return Array.isArray(data?.data) ? data.data : []
+}
+
 const findOpenAIResponseForSession = async (sessionId, attempts = 3, delayMs = 2000) => {
   for (let attempt = 0; attempt < attempts; attempt++) {
     try {
-      const responses = await openaiClient.responses.list({ limit: 20 })
-      const match = responses.data?.find?.((item) => item?.metadata?.sessionId === sessionId)
+      const responses = await listOpenAIResponses(20)
+      const match = responses.find?.((item) => item?.metadata?.sessionId === sessionId)
       if (match) {
         return match
       }
