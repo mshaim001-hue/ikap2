@@ -32,7 +32,7 @@ jobs:
         working-directory: Frontend
         env:
           VITE_APP_BASE_PATH: /ikap2
-          VITE_API_BASE_URL: https://ikap2.onrender.com/api
+          VITE_API_BASE_URL: https://ikap2.onrender.com
         run: npm run build
 
       - name: Upload Pages artifact
