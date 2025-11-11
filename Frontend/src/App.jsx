@@ -316,15 +316,6 @@ function App() {
   })
 
   useEffect(() => {
-    if (reportQuery.data) {
-      console.log('📄 Данные отчёта получены', reportQuery.data)
-    }
-    if (reportQuery.error) {
-      console.error('❌ Ошибка загрузки отчёта', reportQuery.error)
-    }
-  }, [reportQuery.data, reportQuery.error])
-
-  useEffect(() => {
     if (reportsQuery.data) {
       console.log('📋 Список отчётов загружен', reportsQuery.data)
     }
@@ -364,6 +355,15 @@ function App() {
     enabled: Boolean(activeSessionId),
     refetchInterval: false,
   })
+
+  useEffect(() => {
+    if (reportQuery.data) {
+      console.log('📄 Данные отчёта получены', reportQuery.data)
+    }
+    if (reportQuery.error) {
+      console.error('❌ Ошибка загрузки отчёта', reportQuery.error)
+    }
+  }, [reportQuery.data, reportQuery.error])
 
   const analyzeMutation = useMutation({
     mutationFn: analyzeStatements,
