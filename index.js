@@ -1130,6 +1130,8 @@ const getQaAgent = async () => {
   if (!qaAgentInstance) {
     qaAgentInstance = new Agent({
       name: 'iKapitalist Assistant',
+      model: 'gpt-5-mini',
+      modelSettings: { store: true },
       instructions: `
         Ты виртуальный аналитик iKapitalist. Отвечай на вопросы пользователей про процесс анализа выписок,
         загрузку документов, статусы отчётов и работу платформы. Отвечай кратко и по делу, на русском языке.
@@ -1142,11 +1144,71 @@ const getQaAgent = async () => {
   return qaAgentInstance
 }
 
+const contentItemToString = (item) => {
+  if (!item) return ''
+  if (typeof item === 'string') return item
+  if (typeof item.text === 'string') return item.text
+  if (item.text && typeof item.text.value === 'string') return item.text.value
+  if (item.type === 'output_text' && typeof item.value === 'string') return item.value
+  if (item.type === 'input_text' && typeof item.text === 'string') return item.text
+  return ''
+}
+
+const extractAssistantAnswer = (items) => {
+  if (!Array.isArray(items)) return ''
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const entry = items[index]
+    const payload = entry?.rawItem || entry
+    if (!payload || typeof payload !== 'object') continue
+    const role = payload.role
+    if (role !== 'assistant') continue
+    const content = payload.content
+    if (typeof content === 'string') {
+      const trimmed = content.trim()
+      if (trimmed) return trimmed
+      continue
+    }
+    if (Array.isArray(content)) {
+      for (const contentItem of content) {
+        const text = contentItemToString(contentItem).trim()
+        if (text) return text
+      }
+    }
+  }
+  return ''
+}
+
 const runQaAgent = async (prompt, options = {}) => {
   const { run } = await loadAgentsModule()
   const agent = await getQaAgent()
   const result = await run(agent, prompt, options)
-  return result
+  let answer = result?.finalOutput
+
+  if (answer && typeof answer === 'object') {
+    try {
+      const serialized = JSON.stringify(answer)
+      if (serialized && serialized !== '{}') {
+        answer = serialized
+      } else {
+        answer = null
+      }
+    } catch {
+      answer = null
+    }
+  }
+
+  if (typeof answer === 'string') {
+    answer = answer.trim()
+  }
+
+  if (!answer) {
+    const fallback =
+      extractAssistantAnswer(Array.isArray(result?.newItems) ? result.newItems : []) ||
+      extractAssistantAnswer(Array.isArray(result?.history) ? result.history : [])
+    answer = fallback
+  }
+
+  return { result, answer }
 }
 
 app.post('/api/agent/query', async (req, res) => {
@@ -1162,10 +1224,10 @@ app.post('/api/agent/query', async (req, res) => {
   }
 
   try {
-    const result = await runQaAgent(prompt, options)
+    const { result, answer } = await runQaAgent(prompt, options)
     return res.json({
       ok: true,
-      answer: result.finalOutput ?? '',
+      answer: answer ?? '',
       finalAgent: result.finalAgent ? result.finalAgent.name || result.finalAgent : qaAgentInstance?.name,
       history: result.history ?? [],
     })
