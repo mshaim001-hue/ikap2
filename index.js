@@ -24,6 +24,8 @@ console.log('Agents SDK loaded successfully')
 
 const app = express()
 
+app.set('etag', false)
+
 const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS || 1200000)
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY
 
@@ -59,6 +61,13 @@ app.use(cors({
   credentials: true
 }))
 app.use(express.json({ limit: '10mb' }))
+
+app.use((req, res, next) => {
+  if (req.path.startsWith('/api/')) {
+    res.set('Cache-Control', 'no-store')
+  }
+  next()
+})
 
 const frontendDistPath = path.join(__dirname, 'Frontend', 'dist')
 
