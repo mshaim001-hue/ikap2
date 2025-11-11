@@ -6,7 +6,7 @@
     "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
     "dev:backend": "node index.js",
     "dev:frontend": "npm run dev --prefix Frontend",
-    "build": "npm install --prefix Frontend && npm run build --prefix Frontend",
+    "build": "npm install --prefix Frontend --include=dev && npm run build --prefix Frontend",
     "start": "node index.js"
   },
   "dependencies": {
