@@ -25,11 +25,19 @@ export const apiFetch = async (path, options = {}) => {
   const { timeout, headers, ...rest } = options
   const requestInit = {
     credentials: 'include',
+    cache: 'no-store',
     ...rest,
   }
 
   if (headers) {
     requestInit.headers = headers
+  } else {
+    requestInit.headers = {}
+  }
+
+  if (!requestInit.headers['Cache-Control']) {
+    requestInit.headers['Cache-Control'] = 'no-cache'
+    requestInit.headers['Pragma'] = 'no-cache'
   }
 
   const response = await withTimeout(fetch(normalizePath(path), requestInit), timeout)
