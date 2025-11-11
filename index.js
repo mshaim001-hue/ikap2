@@ -814,43 +814,17 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
           },
         ]
 
-    console.log('🤖 Запускаем финансового аналитика через Runner (stream)', {
+    console.log('🤖 Запускаем финансового аналитика через Runner (async)', {
       fileIds: fileIds.length,
       promptPreview: combinedPrompt.slice(0, 200),
     })
 
-    let streamedRun
-    try {
-      streamedRun = await analysisRunner.run(analystAgent, agentInput, { stream: true })
-    } catch (error) {
-      console.error('❌ Не удалось запустить финансового аналитика', {
-        sessionId,
-        error: error.message,
-      })
-      await upsertReport(sessionId, {
-        status: 'failed',
-        reportText: error.message,
-        filesCount: files.length,
-        filesData: filesDataJson,
-        completed: new Date().toISOString(),
-        comment,
-        openaiStatus: 'failed',
-      })
-
-      return res.status(500).json({
-        ok: false,
-        code: 'ANALYSIS_FAILED',
-        message: 'Не удалось запустить анализ выписок.',
-        error: error.message,
-      })
-    }
-
     ;(async () => {
       try {
-        await streamedRun.completed
+        const runResult = await analysisRunner.run(analystAgent, agentInput)
 
-        const rawNewItems = Array.isArray(streamedRun.newItems)
-          ? streamedRun.newItems.map((item) => item?.rawItem || item)
+        const rawNewItems = Array.isArray(runResult.newItems)
+          ? runResult.newItems.map((item) => item?.rawItem || item)
           : []
 
         const historyLengthBefore = history.length
@@ -884,20 +858,20 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
         }
 
         let finalOutputText = ''
-        if (typeof streamedRun.finalOutput === 'string') {
-          finalOutputText = streamedRun.finalOutput.trim()
+        if (typeof runResult.finalOutput === 'string') {
+          finalOutputText = runResult.finalOutput.trim()
         } else if (
-          streamedRun.finalOutput &&
-          typeof streamedRun.finalOutput === 'object' &&
-          typeof streamedRun.finalOutput.text === 'string'
+          runResult.finalOutput &&
+          typeof runResult.finalOutput === 'object' &&
+          typeof runResult.finalOutput.text === 'string'
         ) {
-          finalOutputText = streamedRun.finalOutput.text.trim()
+          finalOutputText = runResult.finalOutput.text.trim()
         }
 
         if (!finalOutputText) {
           finalOutputText =
             extractAssistantAnswer(rawNewItems) ||
-            extractAssistantAnswer(Array.isArray(streamedRun.history) ? streamedRun.history : []) ||
+            extractAssistantAnswer(Array.isArray(runResult.history) ? runResult.history : []) ||
             ''
         }
 
@@ -910,14 +884,14 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
           filesData: filesDataJson,
           completed: completedAt,
           comment,
-          openaiResponseId: streamedRun.lastResponseId || null,
+          openaiResponseId: runResult.lastResponseId || null,
           openaiStatus: finalOutputText ? 'completed' : 'failed',
         })
 
-        console.log('📦 Анализ завершён (stream)', {
+        console.log('📦 Анализ завершён (async)', {
           sessionId,
           durationMs: Date.now() - startedAt.getTime(),
-          responseId: streamedRun.lastResponseId,
+          responseId: runResult.lastResponseId,
         })
       } catch (streamError) {
         console.error('❌ Ошибка в фоне при обработке анализа', {
@@ -932,15 +906,15 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
             filesData: filesDataJson,
             completed: new Date().toISOString(),
             comment,
-            openaiResponseId: streamedRun.lastResponseId || null,
+            openaiResponseId: null,
             openaiStatus: 'failed',
           })
         } catch (dbError) {
-          console.error('⚠️ Не удалось зафиксировать ошибку в БД (stream)', dbError)
+          console.error('⚠️ Не удалось зафиксировать ошибку в БД (async)', dbError)
         }
       }
     })().catch((unhandled) => {
-      console.error('❌ Необработанная ошибка потока анализа', {
+      console.error('❌ Необработанная ошибка фонового анализа', {
         sessionId,
         error: unhandled?.message || unhandled,
       })
