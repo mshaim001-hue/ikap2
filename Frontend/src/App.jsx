@@ -315,6 +315,24 @@ function App() {
     staleTime: 60_000,
   })
 
+  useEffect(() => {
+    if (reportQuery.data) {
+      console.log('📄 Данные отчёта получены', reportQuery.data)
+    }
+    if (reportQuery.error) {
+      console.error('❌ Ошибка загрузки отчёта', reportQuery.error)
+    }
+  }, [reportQuery.data, reportQuery.error])
+
+  useEffect(() => {
+    if (reportsQuery.data) {
+      console.log('📋 Список отчётов загружен', reportsQuery.data)
+    }
+    if (reportsQuery.error) {
+      console.error('❌ Ошибка загрузки списка отчётов', reportsQuery.error)
+    }
+  }, [reportsQuery.data, reportsQuery.error])
+
   const filteredReports = useMemo(() => {
     const list = Array.isArray(reportsQuery.data) ? [...reportsQuery.data] : []
     list.sort((a, b) => {
