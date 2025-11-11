@@ -787,19 +787,16 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
       ? attachments.map((attachment, index) => ({
           role: 'user',
           content: [
-            index === 0
-              ? {
-                  type: 'input_text',
-                  text: combinedPrompt,
-                }
-              : {
-                  type: 'input_text',
-                  text: `Файл ${index + 1}: ${attachment.original_filename || attachment.file_id}`,
-                },
+            {
+              type: 'input_text',
+              text:
+                index === 0
+                  ? `${combinedPrompt}\n\nФайл для анализа: ${attachment.original_filename || attachment.file_id}`
+                  : `Дополнительный файл ${index + 1}: ${attachment.original_filename || attachment.file_id}`,
+            },
             {
               type: 'input_file',
               file: { id: attachment.file_id },
-              filename: attachment.original_filename,
             },
           ],
         }))
