@@ -798,7 +798,7 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
                 },
             {
               type: 'input_file',
-              file_id: attachment.file_id,
+              file: { id: attachment.file_id },
               filename: attachment.original_filename,
             },
           ],
