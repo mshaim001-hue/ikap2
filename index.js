@@ -346,20 +346,51 @@ const appendAssistantMessage = async (sessionId, text) => {
   }
 }
 
+const findOpenAIResponseForSession = async (sessionId, attempts = 3, delayMs = 2000) => {
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      const responses = await openaiClient.responses.list({ limit: 20 })
+      const match = responses.data?.find?.((item) => item?.metadata?.sessionId === sessionId)
+      if (match) {
+        return match
+      }
+    } catch (error) {
+      console.error('⚠️ Не удалось получить список ответов OpenAI', {
+        sessionId,
+        error: error.message,
+      })
+    }
+    if (attempt < attempts - 1) {
+      await sleep(delayMs)
+    }
+  }
+  return null
+}
+
 const maybeUpdateReportFromOpenAI = async (reportRow) => {
-  if (!reportRow?.openai_response_id) return reportRow
   const currentStatus = String(reportRow.status || '').toLowerCase()
   if (FINAL_REPORT_STATUSES.has(currentStatus)) return reportRow
 
   try {
-    const response = await openaiClient.responses.retrieve(reportRow.openai_response_id, {
-      timeout: Math.min(OPENAI_TIMEOUT_MS, 15000),
-    })
+    let response = null
+
+    if (reportRow?.openai_response_id) {
+      response = await openaiClient.responses.retrieve(reportRow.openai_response_id, {
+        timeout: Math.min(OPENAI_TIMEOUT_MS, 15000),
+      })
+    } else {
+      response = await findOpenAIResponseForSession(reportRow.session_id, 3, 2000)
+      if (!response?.id) {
+        return reportRow
+      }
+      reportRow.openai_response_id = response.id
+    }
+
     const openaiStatus = response.status
     const reportStatus = mapOpenAIStatusToReportStatus(openaiStatus)
 
     let reportText = reportRow.report_text || null
-    let completionTimestamp = null
+    let completionTimestamp = reportRow.completed_at || null
 
     if (reportStatus === 'completed') {
       const outputText = extractOutputText(response)
@@ -568,6 +599,8 @@ const defaultUserPrompt = `${financialAnalystInstructions}
 
 Проанализируй прикреплённые банковские выписки и подготовь отчёт строго по указанной выше инструкции.`
 
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))
+
 const normalizeMetadata = (raw) => {
   if (!raw) return null
   if (typeof raw === 'object') return raw
@@ -757,6 +790,9 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
 
     const openaiRequestPayload = {
       model: 'gpt-5',
+      metadata: {
+        sessionId,
+      },
       input: [
         {
           role: 'user',
@@ -798,6 +834,43 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
           responseId: analysisResponse.id,
           status: analysisResponse.status,
         })
+      } else if (error?.message?.toLowerCase()?.includes('timed out')) {
+        console.warn('⚠️ OpenAI запрос превысил таймаут и не вернул идентификатор ответа', {
+          sessionId,
+          error: error.message,
+        })
+        analysisResponse = await findOpenAIResponseForSession(sessionId, 5, 2000)
+        if (!analysisResponse?.id) {
+          await upsertReport(sessionId, {
+            status: 'generating',
+            reportText: null,
+            filesCount: files.length,
+            filesData: JSON.stringify(
+              files.map((file) => ({
+                name: file.originalname,
+                size: file.size,
+                mime: file.mimetype,
+              }))
+            ),
+            completed: null,
+            comment,
+            openaiStatus: 'generating',
+          })
+
+          const progress = await getSessionProgress(sessionId)
+
+          return res.status(202).json({
+            ok: true,
+            sessionId,
+            status: 'generating',
+            openaiStatus: 'generating',
+            message: 'Анализ запущен. Обновите историю позже, чтобы увидеть результат.',
+            data: {
+              progress,
+            },
+            completed: false,
+          })
+        }
       } else {
         throw error
       }
