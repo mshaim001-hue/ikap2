@@ -59,9 +59,11 @@ app.use(cors({
 }))
 app.use(express.json({ limit: '10mb' }))
 
-// В production отдаем статические файлы после сборки
+const frontendDistPath = path.join(__dirname, 'Frontend', 'dist')
+
+// В production отдаем статические файлы после сборки фронтенда
 if (process.env.NODE_ENV === 'production') {
-  app.use(express.static(path.join(__dirname, '../dist')))
+  app.use(express.static(frontendDistPath))
 }
 
 // Глобальный OpenAI клиент для Assistants API
@@ -992,6 +994,12 @@ app.delete('/api/reports/:sessionId', async (req, res) => {
     return res.status(500).json({ ok: false, message: 'Не удалось удалить отчёт.' })
   }
 })
+
+if (process.env.NODE_ENV === 'production') {
+  app.get('*', (_req, res) => {
+    res.sendFile(path.join(frontendDistPath, 'index.html'))
+  })
+}
 
 const port = process.env.PORT || 3001
 
