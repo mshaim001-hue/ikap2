@@ -349,91 +349,18 @@ const appendAssistantMessage = async (sessionId, text) => {
   }
 }
 
-const listOpenAIResponses = async (limit = 20) => {
-  if (!OPENAI_API_KEY) {
-    throw new Error('OPENAI_API_KEY is not set')
-  }
-
-  const url = new URL('https://api.openai.com/v1/responses')
-  url.searchParams.set('limit', String(limit))
-
-  const response = await fetch(url, {
-    method: 'GET',
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
-  })
-
-  const text = await response.text()
-  let data = null
-  try {
-    data = text ? JSON.parse(text) : null
-  } catch {
-    data = null
-  }
-
-  if (!response.ok) {
-    const error = new Error(
-      data?.error?.message || `Failed to list responses: ${response.status} ${text || ''}`.trim()
-    )
-    error.status = response.status
-    if (data?.error) {
-      error.code = data.error.code
-      error.type = data.error.type
-    }
-    throw error
-  }
-
-  return Array.isArray(data?.data) ? data.data : []
-}
-
-const findOpenAIResponseForSession = async (sessionId, attempts = 3, delayMs = 2000) => {
-  for (let attempt = 0; attempt < attempts; attempt++) {
-    try {
-      const responses = await listOpenAIResponses(20)
-      const match = responses.find?.((item) => item?.metadata?.sessionId === sessionId)
-      if (match) {
-        return match
-      }
-    } catch (error) {
-      if (error.code === 'missing_scope') {
-        console.warn(
-          '⚠️ Текущий API-ключ OpenAI не позволяет запрашивать список responses. Статус будет обновлён после нового запроса с идентификатором.',
-          { sessionId }
-        )
-        return null
-      }
-      console.error('⚠️ Не удалось получить список ответов OpenAI', {
-        sessionId,
-        error: error.message,
-      })
-    }
-    if (attempt < attempts - 1) {
-      await sleep(delayMs)
-    }
-  }
-  return null
-}
-
 const maybeUpdateReportFromOpenAI = async (reportRow) => {
   const currentStatus = String(reportRow.status || '').toLowerCase()
   if (FINAL_REPORT_STATUSES.has(currentStatus)) return reportRow
 
   try {
-    let response = null
-
-    if (reportRow?.openai_response_id) {
-      response = await openaiClient.responses.retrieve(reportRow.openai_response_id, {
-        timeout: Math.min(OPENAI_TIMEOUT_MS, 15000),
-      })
-    } else {
-      response = await findOpenAIResponseForSession(reportRow.session_id, 3, 2000)
-      if (!response?.id) {
-        return reportRow
-      }
-      reportRow.openai_response_id = response.id
+    if (!reportRow?.openai_response_id) {
+      return reportRow
     }
+
+    const response = await openaiClient.responses.retrieve(reportRow.openai_response_id, {
+      timeout: Math.min(OPENAI_TIMEOUT_MS, 15000),
+    })
 
     const openaiStatus = response.status
     const reportStatus = mapOpenAIStatusToReportStatus(openaiStatus)
@@ -666,8 +593,6 @@ const createFinancialAnalystAgent = (fileIds = []) => {
   })
 }
 
-const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))
-
 const normalizeMetadata = (raw) => {
   if (!raw) return null
   if (typeof raw === 'object') return raw
@@ -866,6 +791,11 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
             type: 'input_text',
             text: combinedPrompt,
           },
+          ...attachments.map((attachment) => ({
+            type: 'input_file',
+            file_id: attachment.file_id,
+            filename: attachment.original_filename,
+          })),
         ],
       },
     ]
@@ -902,6 +832,17 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
     if (!runResult) {
       throw new Error('Анализ не вернул результат.')
     }
+
+    console.log('✅ Финансовый агент завершил работу', {
+      sessionId,
+      newItems: Array.isArray(runResult.newItems) ? runResult.newItems.length : 0,
+      finalOutputPreview:
+        typeof runResult.finalOutput === 'string'
+          ? runResult.finalOutput.slice(0, 120)
+          : runResult.finalOutput
+          ? '[structured output]'
+          : '(empty)',
+    })
 
     let outputText = runResult.finalOutput
 
