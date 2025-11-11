@@ -295,6 +295,135 @@ const ReportsList = ({
   </section>
 )
 
+const ReportDetails = ({ report, isLoading, isFetching, error, onRefresh, hasSelection }) => {
+  const renderContent = () => {
+    if (!hasSelection) {
+      return (
+        <EmptyState
+          title="Выберите анализ"
+          description="Итоговый отчёт появится здесь. Нажмите на заявку в списке слева."
+        />
+      )
+    }
+
+    if (isLoading || isFetching) {
+      return (
+        <div className="loading-state">
+          <Loader2 size={20} className="spin" />
+          <span>Загружаем подробности...</span>
+        </div>
+      )
+    }
+
+    if (error) {
+      return (
+        <div className="list-alert" style={{ margin: '0 0 16px' }}>
+          <AlertCircle size={16} />
+          <span>{error.message || 'Не удалось загрузить отчёт.'}</span>
+        </div>
+      )
+    }
+
+    if (!report) {
+      return (
+        <EmptyState
+          title="Отчёт недоступен"
+          description="Похоже, сервер не вернул детали. Обновите страницу или повторите попытку позже."
+          icon={AlertCircle}
+        />
+      )
+    }
+
+    let filesList = []
+    if (report.files_data) {
+      try {
+        const parsed = JSON.parse(report.files_data)
+        if (Array.isArray(parsed)) {
+          filesList = parsed
+        }
+      } catch {
+        filesList = []
+      }
+    }
+
+    return (
+      <>
+        <div className="details-grid">
+          <div className="details-item">
+            <span className="details-label">Статус</span>
+            <span style={{ display: 'inline-flex' }}>
+              <StatusBadge status={report.status} />
+            </span>
+          </div>
+          <div className="details-item">
+            <span className="details-label">Сессия</span>
+            <span>{report.session_id}</span>
+          </div>
+          <div className="details-item">
+            <span className="details-label">Создан</span>
+            <span>{formatDate(report.created_at)}</span>
+          </div>
+          <div className="details-item">
+            <span className="details-label">Завершён</span>
+            <span>{formatDate(report.completed_at)}</span>
+          </div>
+          <div className="details-item">
+            <span className="details-label">Контакт</span>
+            <span>{report.name || report.email || report.phone || '—'}</span>
+          </div>
+          <div className="details-item">
+            <span className="details-label">Комментарий</span>
+            <span>{report.comment || '—'}</span>
+          </div>
+        </div>
+
+        {filesList.length > 0 && (
+          <div className="details-report">
+            <h3>Прикреплённые файлы</h3>
+            <article>
+              {filesList.map((file) => (
+                <div key={`${file.file_id || file.name}`}>
+                  <strong>{file.name || 'Файл'}</strong>{' '}
+                  {typeof file.size === 'number' ? `· ${formatFileSize(file.size)}` : null}{' '}
+                  {file.mime ? `· ${file.mime}` : null}
+                </div>
+              ))}
+            </article>
+          </div>
+        )}
+
+        <div className="details-report">
+          <h3>Отчёт</h3>
+          <article>
+            {report.report_text ? report.report_text.trim() : 'Агент не вернул текст отчёта.'}
+          </article>
+        </div>
+      </>
+    )
+  }
+
+  return (
+    <section className="card">
+      <header className="card-header">
+        <div>
+          <h2>Детали анализа</h2>
+          <p>Подробности выбранной заявки и итоговый отчёт агента</p>
+        </div>
+        <button
+          type="button"
+          className="icon-button"
+          onClick={() => onRefresh?.()}
+          aria-label="Обновить детали"
+          disabled={!hasSelection || isLoading || isFetching}
+        >
+          {isLoading || isFetching ? <Loader2 size={18} className="spin" /> : <RefreshCw size={18} />}
+        </button>
+      </header>
+      <div className="card-body">{renderContent()}</div>
+    </section>
+  )
+}
+
 function App() {
   const queryClient = useQueryClient()
   const [files, setFiles] = useState([])
@@ -550,6 +679,18 @@ function App() {
             isRefreshing={reportsQuery.isFetching}
             deletingSessionId={pendingDelete}
             error={listError}
+          />
+          <ReportDetails
+            report={reportQuery.data}
+            isLoading={reportQuery.isLoading}
+            isFetching={reportQuery.isFetching}
+            error={reportQuery.error}
+            onRefresh={() => {
+              if (activeSessionId) {
+                reportQuery.refetch()
+              }
+            }}
+            hasSelection={Boolean(activeSessionId)}
           />
         </div>
       </main>
