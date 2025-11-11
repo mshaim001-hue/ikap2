@@ -783,22 +783,37 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
     const fileIds = attachments.map((attachment) => attachment.file_id)
     const analystAgent = createFinancialAnalystAgent(fileIds)
 
-    const agentInput = [
-      {
-        role: 'user',
-        content: [
+    const agentInput = attachments.length
+      ? attachments.map((attachment, index) => ({
+          role: 'user',
+          content: [
+            index === 0
+              ? {
+                  type: 'input_text',
+                  text: combinedPrompt,
+                }
+              : {
+                  type: 'input_text',
+                  text: `Файл ${index + 1}: ${attachment.original_filename || attachment.file_id}`,
+                },
+            {
+              type: 'input_file',
+              file_id: attachment.file_id,
+              filename: attachment.original_filename,
+            },
+          ],
+        }))
+      : [
           {
-            type: 'input_text',
-            text: combinedPrompt,
+            role: 'user',
+            content: [
+              {
+                type: 'input_text',
+                text: combinedPrompt,
+              },
+            ],
           },
-          ...attachments.map((attachment) => ({
-            type: 'input_file',
-            file_id: attachment.file_id,
-            filename: attachment.original_filename,
-          })),
-        ],
-      },
-    ]
+        ]
 
     console.log('🤖 Запускаем финансового аналитика через Runner', {
       fileIds: fileIds.length,
