@@ -1,25 +1,22 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   AlertCircle,
   CheckCircle2,
   Clock,
   FileText,
+  Info,
   Loader2,
   Paperclip,
   RefreshCw,
   Search,
   Send,
   Inbox,
+  Trash2,
   X,
 } from 'lucide-react'
 import './App.css'
-import {
-  analyzeStatements,
-  fetchMessagesBySession,
-  fetchReportBySession,
-  fetchReportsList,
-} from './api/analysis'
+import { analyzeStatements, fetchReportBySession, fetchReportsList, deleteReport } from './api/analysis'
 
 const MAX_FILE_SIZE = 50 * 1024 * 1024 // 50 MB
 
@@ -56,31 +53,6 @@ const formatFileSize = (size) => {
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
   if (size < 1024 * 1024 * 1024) return `${(size / (1024 * 1024)).toFixed(1)} MB`
   return `${(size / (1024 * 1024 * 1024)).toFixed(1)} GB`
-}
-
-const extractMessageText = (message) => {
-  if (!message) return ''
-
-  if (typeof message === 'string') return message
-  if (Array.isArray(message)) {
-    return message.map(extractMessageText).filter(Boolean).join('\n')
-  }
-
-  if (typeof message === 'object') {
-    if (typeof message.text === 'string') return message.text
-    if (Array.isArray(message.text)) {
-      return message.text.map((item) => (typeof item === 'string' ? item : extractMessageText(item))).join('\n')
-    }
-    if (message.content) {
-      return extractMessageText(message.content)
-    }
-  }
-
-  try {
-    return JSON.stringify(message, null, 2)
-  } catch {
-    return String(message)
-  }
 }
 
 const StatusBadge = ({ status }) => {
@@ -203,67 +175,18 @@ const UploadPanel = ({
   )
 }
 
-const MessagesPanel = ({ messages, isLoading, status, updatedAt }) => (
-  <section className="card messages-card">
-    <header className="card-header">
-      <div>
-        <h2>Ответы агента</h2>
-        <p>История взаимодействия по текущей сессии</p>
-      </div>
-      {status && (
-        <div className="status-wrapper">
-          <StatusBadge status={status} />
-          <span className="updated-at">Обновлено: {formatDate(updatedAt)}</span>
-        </div>
-      )}
-    </header>
-    <div className="card-body messages-body">
-      {isLoading ? (
-        <div className="loading-state">
-          <Loader2 size={20} className="spin" />
-          <span>Загружаем историю сообщений...</span>
-        </div>
-      ) : messages.length === 0 ? (
-        <EmptyState
-          title="Нет сообщений"
-          description="Сообщения появятся после запуска анализа и ответа агента."
-        />
-      ) : (
-        <ul className="messages-timeline">
-          {messages.map((message, index) => {
-            const role = message.role || message.author || 'agent'
-            const text = extractMessageText(message.content || message.text || message)
-            return (
-              <li key={`${role}-${index}`} className={`timeline-item timeline-${role}`}>
-                <div className="timeline-marker" />
-                <div className="timeline-content">
-                  <div className="timeline-header">
-                    <span className="timeline-role">
-                      {role === 'user' ? 'Сотрудник' : 'Аналитический агент'}
-                    </span>
-                    {message.created_at && (
-                      <span className="timeline-date">{formatDate(message.created_at)}</span>
-                    )}
-                  </div>
-                  <p>{text}</p>
-                </div>
-              </li>
-            )
-          })}
-        </ul>
-      )}
-    </div>
-  </section>
-)
-
 const ReportsList = ({
   reports,
   isLoading,
   onRefresh,
   onSelect,
+  onDelete,
   activeSessionId,
   searchTerm,
   onSearchChange,
+  isRefreshing,
+  deletingSessionId,
+  error,
 }) => (
   <section className="card reports-card">
     <header className="card-header">
@@ -271,8 +194,14 @@ const ReportsList = ({
         <h2>История анализов</h2>
         <p>Последние заявки и статусы обработки</p>
       </div>
-      <button type="button" className="icon-button" onClick={onRefresh} aria-label="Обновить список">
-        <RefreshCw size={18} />
+      <button
+        type="button"
+        className="icon-button"
+        onClick={onRefresh}
+        aria-label="Обновить список"
+        disabled={isRefreshing}
+      >
+        {isRefreshing ? <Loader2 size={18} className="spin" /> : <RefreshCw size={18} />}
       </button>
     </header>
     <div className="card-body reports-body">
@@ -285,6 +214,13 @@ const ReportsList = ({
           onChange={(event) => onSearchChange(event.target.value)}
         />
       </div>
+
+      {error && (
+        <div className="list-alert">
+          <AlertCircle size={16} />
+          <span>{error}</span>
+        </div>
+      )}
 
       {isLoading ? (
         <div className="loading-state">
@@ -300,143 +236,60 @@ const ReportsList = ({
         <ul className="reports-list">
           {reports.map((report) => {
             const sessionKey = report.session_id || report.id
+            const commentTitle = (report.comment || '').trim()
+            const primaryTitle =
+              commentTitle || report.company_bin || report.name || report.email || 'Без названия'
             return (
-            <li
-              key={sessionKey}
-              className={`reports-item ${
-                activeSessionId && activeSessionId === sessionKey ? 'reports-item-active' : ''
-              }`}
-            >
-              <button type="button" onClick={() => onSelect(sessionKey)}>
-                <div className="reports-item-header">
-                  <strong>{report.company_bin || 'Не указан БИН'}</strong>
-                  <StatusBadge status={report.status} />
+              <li
+                key={sessionKey}
+                className={`reports-item ${
+                  activeSessionId && activeSessionId === sessionKey ? 'reports-item-active' : ''
+                }`}
+              >
+                <div
+                  className="reports-item-content"
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => onSelect(sessionKey)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault()
+                      onSelect(sessionKey)
+                    }
+                  }}
+                >
+                  <div className="reports-item-header">
+                    <strong>{primaryTitle}</strong>
+                    <div className="reports-item-actions">
+                      <StatusBadge status={report.status} />
+                      <button
+                        type="button"
+                        className="icon-button icon-button-danger"
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          onDelete(sessionKey)
+                        }}
+                        aria-label="Удалить анализ"
+                        disabled={deletingSessionId === sessionKey}
+                      >
+                        {deletingSessionId === sessionKey ? (
+                          <Loader2 size={16} className="spin" />
+                        ) : (
+                          <Trash2 size={16} />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                  <div className="reports-item-meta">
+                    <span>{report.name || report.email || '—'}</span>
+                    <span>{formatDate(report.created_at)}</span>
+                  </div>
+                  {report.company_bin && <p className="reports-item-comment">{report.company_bin}</p>}
                 </div>
-                <div className="reports-item-meta">
-                  <span>{report.name || report.email || '—'}</span>
-                  <span>{formatDate(report.created_at)}</span>
-                </div>
-                {report.comment && <p className="reports-item-comment">{report.comment}</p>}
-              </button>
-            </li>
+              </li>
             )
           })}
         </ul>
-      )}
-    </div>
-  </section>
-)
-
-const ReportDetails = ({ report, isLoading }) => (
-  <section className="card details-card">
-    <header className="card-header">
-      <div>
-        <h2>Детали отчёта</h2>
-        <p>Описание результата анализа и ключевые показатели</p>
-      </div>
-    </header>
-    <div className="card-body details-body">
-      {isLoading ? (
-        <div className="loading-state">
-          <Loader2 size={20} className="spin" />
-          <span>Загружаем отчёт...</span>
-        </div>
-      ) : !report ? (
-        <EmptyState
-          title="Выберите отчёт"
-          description="Нажмите на заявку из списка, чтобы увидеть подробности анализа."
-        />
-      ) : (
-        <>
-          <div className="details-grid">
-            <div className="details-item">
-              <span className="details-label">Статус</span>
-              <StatusBadge status={report.status} />
-            </div>
-            <div className="details-item">
-              <span className="details-label">Создано</span>
-              <span>{formatDate(report.created_at)}</span>
-            </div>
-            <div className="details-item">
-              <span className="details-label">Завершено</span>
-              <span>{formatDate(report.completed_at)}</span>
-            </div>
-            <div className="details-item">
-              <span className="details-label">Количество файлов</span>
-              <span>{report.files_count ?? '—'}</span>
-            </div>
-          </div>
-
-          <div className="details-grid">
-            <div className="details-item">
-              <span className="details-label">Компания (БИН)</span>
-              <span>{report.company_bin || '—'}</span>
-            </div>
-            <div className="details-item">
-              <span className="details-label">Запрашиваемая сумма</span>
-              <span>{report.amount || '—'}</span>
-            </div>
-            <div className="details-item">
-              <span className="details-label">Срок</span>
-              <span>{report.term || '—'}</span>
-            </div>
-            <div className="details-item">
-              <span className="details-label">Цель финансирования</span>
-              <span>{report.purpose || '—'}</span>
-            </div>
-          </div>
-
-          <div className="details-grid">
-            <div className="details-item">
-              <span className="details-label">Контактное лицо</span>
-              <span>{report.name || '—'}</span>
-            </div>
-            <div className="details-item">
-              <span className="details-label">Телефон</span>
-              <span>{report.phone || '—'}</span>
-            </div>
-            <div className="details-item">
-              <span className="details-label">Email</span>
-              <span>{report.email || '—'}</span>
-            </div>
-          </div>
-
-          {report.report_text && (
-            <div className="details-report">
-              <h3>Основной отчёт</h3>
-              <article>
-                {report.report_text.split('\n').map((line, index) => (
-                  <p key={index}>{line}</p>
-                ))}
-              </article>
-            </div>
-          )}
-
-          {(report.tax_report_text || report.fs_report_text) && (
-            <div className="details-columns">
-              {report.tax_report_text && (
-                <div className="details-report">
-                  <h3>Налоговый анализ</h3>
-                  <article>
-                    {report.tax_report_text.split('\n').map((line, index) => (
-                      <p key={`tax-${index}`}>{line}</p>
-                    ))}
-                  </article>
-                </div>
-              )}
-              {report.fs_report_text && (
-                <div className="details-report">
-                  <h3>Финансовая отчётность</h3>
-                  <article>
-                    {report.fs_report_text.split('\n').map((line, index) => (
-                      <p key={`fs-${index}`}>{line}</p>
-                    ))}
-                  </article>
-                </div>
-              )}
-            </div>
-          )}
-        </>
       )}
     </div>
   </section>
@@ -448,8 +301,13 @@ function App() {
   const [comment, setComment] = useState('')
   const [activeSessionId, setActiveSessionId] = useState(null)
   const [submitError, setSubmitError] = useState('')
-  const [shouldPoll, setShouldPoll] = useState(false)
   const [searchTerm, setSearchTerm] = useState('')
+  const [listError, setListError] = useState('')
+  const [pendingDelete, setPendingDelete] = useState(null)
+  const [forceSpinner, setForceSpinner] = useState(false)
+  const reloadTimerRef = useRef(null)
+  const [toast, setToast] = useState(null)
+  const toastTimerRef = useRef(null)
 
   const reportsQuery = useQuery({
     queryKey: ['reports'],
@@ -486,14 +344,7 @@ function App() {
     queryKey: ['report', activeSessionId],
     queryFn: () => fetchReportBySession(activeSessionId),
     enabled: Boolean(activeSessionId),
-    refetchInterval: shouldPoll ? 5000 : false,
-  })
-
-  const messagesQuery = useQuery({
-    queryKey: ['messages', activeSessionId],
-    queryFn: () => fetchMessagesBySession(activeSessionId),
-    enabled: Boolean(activeSessionId),
-    refetchInterval: shouldPoll ? 5000 : false,
+    refetchInterval: false,
   })
 
   const analyzeMutation = useMutation({
@@ -502,7 +353,6 @@ function App() {
       setSubmitError('')
       if (result?.sessionId) {
         setActiveSessionId(result.sessionId)
-        setShouldPoll(true)
       }
       queryClient.invalidateQueries({ queryKey: ['reports'] })
       setFiles([])
@@ -510,16 +360,44 @@ function App() {
     },
     onError: (error) => {
       setSubmitError(error?.message || 'Не удалось отправить файлы. Попробуйте ещё раз.')
+      setForceSpinner(false)
+      if (reloadTimerRef.current) {
+        clearTimeout(reloadTimerRef.current)
+        reloadTimerRef.current = null
+      }
+    },
+  })
+
+  const deleteReportMutation = useMutation({
+    mutationFn: deleteReport,
+    onMutate: (sessionId) => {
+      setPendingDelete(sessionId)
+      setListError('')
+    },
+    onSuccess: (_data, sessionId) => {
+      if (activeSessionId === sessionId) {
+        setActiveSessionId(null)
+        queryClient.removeQueries({ queryKey: ['report', sessionId] })
+      }
+      queryClient.invalidateQueries({ queryKey: ['reports'] })
+      setPendingDelete(null)
+    },
+    onError: (error) => {
+      setListError(error?.message || 'Не удалось удалить анализ. Попробуйте снова.')
+      setPendingDelete(null)
     },
   })
 
   useEffect(() => {
-    if (!shouldPoll || !reportQuery.data?.status) return
-    if (['completed', 'failed'].includes(reportQuery.data.status)) {
-      setShouldPoll(false)
-      queryClient.invalidateQueries({ queryKey: ['reports'] })
+    return () => {
+      if (reloadTimerRef.current) {
+        clearTimeout(reloadTimerRef.current)
+      }
+      if (toastTimerRef.current) {
+        clearTimeout(toastTimerRef.current)
+      }
     }
-  }, [shouldPoll, reportQuery.data, queryClient])
+  }, [])
 
   const handleFilesChange = (selectedFiles) => {
     const oversized = selectedFiles.find((file) => file.size > MAX_FILE_SIZE)
@@ -538,22 +416,86 @@ function App() {
   }
 
   const handleSubmit = () => {
+    if (forceSpinner) return
     if (files.length === 0) {
       setSubmitError('Добавьте хотя бы один файл для анализа.')
       return
     }
     setSubmitError('')
+    if (reloadTimerRef.current) {
+      clearTimeout(reloadTimerRef.current)
+    }
+    setForceSpinner(true)
+    if (toastTimerRef.current) {
+      clearTimeout(toastTimerRef.current)
+    }
+    setToast({
+      type: 'info',
+      text: 'Выписки отправлены на анализ. Обновите историю позже, чтобы увидеть результат.',
+    })
+    toastTimerRef.current = setTimeout(() => {
+      setToast(null)
+      toastTimerRef.current = null
+    }, 5000)
+    reloadTimerRef.current = setTimeout(() => {
+      if (typeof window !== 'undefined') {
+        window.location.reload()
+      }
+    }, 4000)
     analyzeMutation.mutate({
       comment: comment.trim(),
       files,
     })
   }
 
-  const selectedReport = reportQuery.data ?? null
-  const messages = messagesQuery.data ?? selectedReport?.messages ?? []
+  const handleRefreshReports = async () => {
+    setListError('')
+
+    const tasks = [reportsQuery.refetch()]
+    if (activeSessionId) {
+      tasks.push(reportQuery.refetch())
+    }
+
+    try {
+      const results = await Promise.all(tasks)
+      const failed = results.find((result) => result.error)
+      if (failed?.error) {
+        setListError(failed.error.message || 'Не удалось обновить данные.')
+      }
+    } catch (error) {
+      setListError(error?.message || 'Не удалось обновить данные.')
+    }
+  }
+
+  const handleDeleteReport = (sessionId) => {
+    if (!sessionId) return
+    const confirmDelete = window.confirm('Удалить выбранный анализ? Это действие необратимо.')
+    if (!confirmDelete) return
+    deleteReportMutation.mutate(sessionId)
+  }
 
   return (
     <div className="app">
+      {toast && (
+        <div className={`toast toast-${toast.type}`} role="status">
+          {toast.type === 'info' ? <InfoIcon /> : null}
+          <span>{toast.text}</span>
+          <button
+            type="button"
+            className="toast-close"
+            onClick={() => {
+              setToast(null)
+              if (toastTimerRef.current) {
+                clearTimeout(toastTimerRef.current)
+                toastTimerRef.current = null
+              }
+            }}
+            aria-label="Закрыть уведомление"
+          >
+            <X size={14} />
+          </button>
+        </div>
+      )}
       <header className="app-header">
         <div>
           <h1>iKapitalist · Анализ выписок</h1>
@@ -570,15 +512,8 @@ function App() {
             comment={comment}
             onCommentChange={setComment}
             onSubmit={handleSubmit}
-            isSubmitting={analyzeMutation.isLoading}
+            isSubmitting={analyzeMutation.isLoading || forceSpinner}
             error={submitError}
-          />
-
-          <MessagesPanel
-            messages={messages}
-            isLoading={messagesQuery.isLoading || reportQuery.isLoading}
-            status={selectedReport?.status}
-            updatedAt={selectedReport?.updated_at || selectedReport?.completed_at}
           />
         </div>
 
@@ -586,17 +521,18 @@ function App() {
           <ReportsList
             reports={filteredReports}
             isLoading={reportsQuery.isLoading}
-            onRefresh={() => reportsQuery.refetch()}
+            onRefresh={handleRefreshReports}
             onSelect={(sessionId) => {
               setActiveSessionId(sessionId)
-              setShouldPoll(true)
             }}
+            onDelete={handleDeleteReport}
             activeSessionId={activeSessionId}
             searchTerm={searchTerm}
             onSearchChange={setSearchTerm}
+            isRefreshing={reportsQuery.isFetching}
+            deletingSessionId={pendingDelete}
+            error={listError}
           />
-
-          <ReportDetails report={selectedReport} isLoading={reportQuery.isLoading} />
         </div>
       </main>
     </div>
@@ -604,3 +540,5 @@ function App() {
 }
 
 export default App
+
+const InfoIcon = () => <Info size={14} />

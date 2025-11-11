@@ -66,3 +66,15 @@ export const fetchMessagesBySession = async (sessionId) => {
   return []
 }
 
+export const deleteReport = async (sessionId) => {
+  if (!sessionId) {
+    throw new Error('Не указан идентификатор отчёта.')
+  }
+
+  await apiFetch(`${REPORTS_ENDPOINT}/${sessionId}`, {
+    method: 'DELETE',
+  })
+
+  return true
+}
+

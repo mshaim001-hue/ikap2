@@ -87,6 +87,9 @@ async function initSchema() {
         name TEXT,
         email TEXT,
         phone TEXT,
+        comment TEXT,
+        openai_response_id TEXT,
+        openai_status TEXT,
         report_text TEXT,
         status TEXT DEFAULT 'generating',
         files_count INTEGER DEFAULT 0,
@@ -128,6 +131,9 @@ async function initSchema() {
       ALTER TABLE reports ADD COLUMN IF NOT EXISTS fs_report_text TEXT;
       ALTER TABLE reports ADD COLUMN IF NOT EXISTS fs_status TEXT DEFAULT 'pending';
       ALTER TABLE reports ADD COLUMN IF NOT EXISTS fs_missing_periods TEXT;
+      ALTER TABLE reports ADD COLUMN IF NOT EXISTS comment TEXT;
+      ALTER TABLE reports ADD COLUMN IF NOT EXISTS openai_response_id TEXT;
+      ALTER TABLE reports ADD COLUMN IF NOT EXISTS openai_status TEXT;
     `)
   } else {
     db.exec(`
@@ -141,6 +147,9 @@ async function initSchema() {
         name TEXT,
         email TEXT,
         phone TEXT,
+        comment TEXT,
+        openai_response_id TEXT,
+        openai_status TEXT,
         report_text TEXT,
         status TEXT DEFAULT 'generating',
         files_count INTEGER DEFAULT 0,
@@ -174,6 +183,27 @@ async function initSchema() {
       CREATE INDEX IF NOT EXISTS idx_files_session ON files(session_id);
       CREATE INDEX IF NOT EXISTS idx_reports_created ON reports(created_at);
     `)
+    try {
+      db.exec(`ALTER TABLE reports ADD COLUMN comment TEXT`)
+    } catch (error) {
+      if (!/duplicate column name/i.test(error.message || '')) {
+        console.warn('⚠️ Не удалось добавить колонку comment в таблицу reports (SQLite)', error)
+      }
+    }
+    try {
+      db.exec(`ALTER TABLE reports ADD COLUMN openai_response_id TEXT`)
+    } catch (error) {
+      if (!/duplicate column name/i.test(error.message || '')) {
+        console.warn('⚠️ Не удалось добавить колонку openai_response_id в таблицу reports (SQLite)', error)
+      }
+    }
+    try {
+      db.exec(`ALTER TABLE reports ADD COLUMN openai_status TEXT`)
+    } catch (error) {
+      if (!/duplicate column name/i.test(error.message || '')) {
+        console.warn('⚠️ Не удалось добавить колонку openai_status в таблицу reports (SQLite)', error)
+      }
+    }
   }
   console.log('✅ Database initialized with all tables')
 }
@@ -281,6 +311,97 @@ const categorizeUploadedFile = (originalName, mimeType) => {
   
   // Если формат не поддерживается - вернем null
   return null
+}
+
+const OPENAI_FAILURE_STATUSES = new Set(['failed', 'cancelled', 'expired'])
+const FINAL_REPORT_STATUSES = new Set(['completed', 'failed'])
+
+const mapOpenAIStatusToReportStatus = (status) => {
+  const normalized = String(status || '').toLowerCase()
+  if (normalized === 'completed') return 'completed'
+  if (OPENAI_FAILURE_STATUSES.has(normalized)) return 'failed'
+  return 'generating'
+}
+
+const appendAssistantMessage = async (sessionId, text) => {
+  if (!text) return
+  try {
+    conversationHistory.set(sessionId, conversationHistory.get(sessionId) || [])
+    const history = conversationHistory.get(sessionId)
+    history.push({ role: 'assistant', content: [{ type: 'text', text }] })
+
+    const countRow = await db
+      .prepare(`SELECT COUNT(*) as cnt FROM messages WHERE session_id = ?`)
+      .get(sessionId)
+    const nextOrder = (countRow?.cnt || 0) + 1
+
+    await saveMessageToDB(sessionId, 'assistant', [{ type: 'text', text }], nextOrder)
+  } catch (error) {
+    console.error('⚠️ Не удалось сохранить сообщение ассистента при синхронизации', {
+      sessionId,
+      error: error.message,
+    })
+  }
+}
+
+const maybeUpdateReportFromOpenAI = async (reportRow) => {
+  if (!reportRow?.openai_response_id) return reportRow
+  const currentStatus = String(reportRow.status || '').toLowerCase()
+  if (FINAL_REPORT_STATUSES.has(currentStatus)) return reportRow
+
+  try {
+    const response = await openaiClient.responses.retrieve(reportRow.openai_response_id, {
+      timeout: Math.min(OPENAI_TIMEOUT_MS, 15000),
+    })
+    const openaiStatus = response.status
+    const reportStatus = mapOpenAIStatusToReportStatus(openaiStatus)
+
+    let reportText = reportRow.report_text || null
+    let completionTimestamp = null
+
+    if (reportStatus === 'completed') {
+      const outputText = extractOutputText(response)
+      if (outputText && !reportRow.report_text) {
+        await appendAssistantMessage(reportRow.session_id, outputText)
+        reportText = outputText
+      } else if (outputText) {
+        reportText = outputText
+      }
+      completionTimestamp = new Date().toISOString()
+    } else if (reportStatus === 'failed') {
+      if (!reportText) {
+        reportText = response.last_error?.message || `OpenAI вернул статус ${openaiStatus}`
+      }
+      completionTimestamp = new Date().toISOString()
+    }
+
+    await upsertReport(reportRow.session_id, {
+      status: reportStatus,
+      reportText,
+      filesCount: reportRow.files_count,
+      filesData: reportRow.files_data,
+      completed: completionTimestamp,
+      comment: reportRow.comment,
+      openaiResponseId: response.id,
+      openaiStatus,
+    })
+
+    const updatedRow = await db
+      .prepare(
+        `SELECT session_id, status, company_bin, amount, term, purpose, name, email, phone, comment, created_at, completed_at, files_count, files_data, report_text, tax_report_text, tax_status, tax_missing_periods, fs_report_text, fs_status, fs_missing_periods, openai_response_id, openai_status
+         FROM reports
+         WHERE session_id = ?`
+      )
+      .get(reportRow.session_id)
+
+    return updatedRow || reportRow
+  } catch (error) {
+    console.error('⚠️ Не удалось обновить статус отчёта из OpenAI', {
+      sessionId: reportRow.session_id,
+      error: error.message,
+    })
+    return reportRow
+  }
 }
 
 // Получение прогресса по сессии
@@ -445,26 +566,6 @@ const defaultUserPrompt = `${financialAnalystInstructions}
 
 Проанализируй прикреплённые банковские выписки и подготовь отчёт строго по указанной выше инструкции.`
 
-const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))
-
-const waitForResponseCompletion = async (response) => {
-  let current = response
-
-  while (current.status === 'in_progress' || current.status === 'queued') {
-    await sleep(5000)
-    current = await openaiClient.responses.retrieve(current.id)
-  }
-
-  if (current.status === 'failed') {
-    const errorMessage = current.last_error?.message || 'OpenAI response failed'
-    const error = new Error(errorMessage)
-    error.openaiResponse = current
-    throw error
-  }
-
-  return current
-}
-
 const normalizeMetadata = (raw) => {
   if (!raw) return null
   if (typeof raw === 'object') return raw
@@ -506,17 +607,20 @@ const extractOutputText = (response) => {
 }
 
 const upsertReport = async (sessionId, payload) => {
-  const { status, reportText, filesCount, filesData, completed } = payload
+  const { status, reportText, filesCount, filesData, completed, comment, openaiResponseId, openaiStatus } = payload
   try {
     const stmt = db.prepare(`
-      INSERT INTO reports (session_id, status, report_text, files_count, files_data, completed_at)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO reports (session_id, status, report_text, files_count, files_data, completed_at, comment, openai_response_id, openai_status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(session_id) DO UPDATE SET
         status = excluded.status,
         report_text = excluded.report_text,
         files_count = excluded.files_count,
         files_data = excluded.files_data,
-        completed_at = excluded.completed_at
+        completed_at = excluded.completed_at,
+        comment = COALESCE(excluded.comment, reports.comment),
+        openai_response_id = COALESCE(excluded.openai_response_id, reports.openai_response_id),
+        openai_status = COALESCE(excluded.openai_status, reports.openai_status)
     `)
     await stmt.run(
       sessionId,
@@ -524,7 +628,10 @@ const upsertReport = async (sessionId, payload) => {
       reportText || null,
       typeof filesCount === 'number' ? filesCount : null,
       filesData || null,
-      completed || null
+      completed || null,
+      comment ?? null,
+      openaiResponseId ?? null,
+      openaiStatus ?? null
     )
   } catch (error) {
     console.error('❌ Ошибка сохранения отчёта в БД:', error)
@@ -622,6 +729,25 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
       })
     }
 
+    try {
+      await upsertReport(sessionId, {
+        status: 'generating',
+        reportText: null,
+        filesCount: files.length,
+        filesData: JSON.stringify(
+          files.map((file) => ({
+            name: file.originalname,
+            size: file.size,
+            mime: file.mimetype,
+          }))
+        ),
+        completed: null,
+        comment,
+      })
+    } catch (error) {
+      console.error('⚠️ Не удалось создать запись отчёта перед анализом', error)
+    }
+
     const metadataPrompt = buildPromptFromMetadata(metadata)
     const combinedPrompt = [defaultUserPrompt, metadataPrompt, comment]
       .filter(Boolean)
@@ -664,43 +790,53 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
         timeout: OPENAI_TIMEOUT_MS,
       })
     } catch (error) {
-      if (error?.message?.toLowerCase()?.includes('timed out')) {
-        console.warn('⚠️ OpenAI запрос превысил таймаут, продолжаем ожидать завершение по идентификатору ответа')
-        if (error?.response?.id) {
-          analysisResponse = await waitForResponseCompletion({ id: error.response.id, status: 'queued' })
-        } else {
-          throw error
-        }
+      if (error?.response?.id) {
+        analysisResponse = error.response
+        console.warn('⚠️ OpenAI запрос превысил таймаут при создании ответа', {
+          responseId: analysisResponse.id,
+          status: analysisResponse.status,
+        })
       } else {
         throw error
       }
     }
 
-    if (analysisResponse.status === 'in_progress' || analysisResponse.status === 'queued') {
-      analysisResponse = await waitForResponseCompletion(analysisResponse)
+    if (!analysisResponse?.id) {
+      throw new Error('Не удалось получить идентификатор ответа OpenAI.')
     }
 
-    console.log('✅ Ответ от OpenAI получен', {
+    console.log('✅ Ответ OpenAI инициирован', {
       id: analysisResponse.id,
       status: analysisResponse.status,
       model: analysisResponse.model,
-      usage: analysisResponse.usage,
     })
 
-    const outputText = extractOutputText(analysisResponse)
+    const openaiStatus = analysisResponse.status
+    const reportStatus = mapOpenAIStatusToReportStatus(openaiStatus)
+    let outputText = null
+    let completedAt = null
 
-    if (outputText) {
-      history.push({ role: 'assistant', content: [{ type: 'text', text: outputText }] })
-      await saveMessageToDB(
-        sessionId,
-        'assistant',
-        [{ type: 'text', text: outputText }],
-        history.length
-      )
+    if (reportStatus === 'completed') {
+      outputText = extractOutputText(analysisResponse) || null
+      completedAt = new Date().toISOString()
+      if (outputText) {
+        history.push({ role: 'assistant', content: [{ type: 'text', text: outputText }] })
+        await saveMessageToDB(
+          sessionId,
+          'assistant',
+          [{ type: 'text', text: outputText }],
+          history.length
+        )
+      }
+    } else if (reportStatus === 'failed') {
+      outputText =
+        analysisResponse.last_error?.message ||
+        'OpenAI вернул ошибку при запуске анализа. Повторите попытку позже.'
+      completedAt = new Date().toISOString()
     }
 
     await upsertReport(sessionId, {
-      status: 'completed',
+      status: reportStatus,
       reportText: outputText,
       filesCount: files.length,
       filesData: JSON.stringify(
@@ -710,27 +846,35 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
           mime: file.mimetype,
         }))
       ),
-      completed: new Date().toISOString(),
+      completed: completedAt,
+      comment,
+      openaiResponseId: analysisResponse.id,
+      openaiStatus,
     })
 
     const progress = await getSessionProgress(sessionId)
 
-    console.log('📦 Итог анализа', {
+    console.log('📦 Анализ зарегистрирован', {
       sessionId,
       durationMs: Date.now() - startedAt.getTime(),
-      hasOutput: Boolean(outputText),
+      openaiStatus,
       progress,
     })
 
     return res.json({
       ok: true,
       sessionId,
-      message: outputText || 'От OpenAI не пришло текстового ответа.',
+      status: reportStatus,
+      openaiStatus,
+      message:
+        reportStatus === 'completed'
+          ? outputText || 'От OpenAI не пришло текстового ответа.'
+          : 'Анализ запущен. Ответ появится после обновления истории.',
       data: {
         progress,
         usage: analysisResponse.usage,
       },
-      completed: true,
+      completed: reportStatus === 'completed',
     })
   } catch (error) {
     console.error('❌ Ошибка анализа выписок', {
@@ -746,6 +890,8 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
         filesCount: files.length,
         filesData: JSON.stringify(summariseFilesForLog(files)),
         completed: new Date().toISOString(),
+        comment,
+        openaiStatus: 'failed',
       })
     } catch (dbError) {
       console.error('⚠️ Не удалось зафиксировать ошибку в БД', dbError)
@@ -764,14 +910,16 @@ app.get('/api/reports', async (_req, res) => {
   try {
     const rows = await db
       .prepare(
-        `SELECT session_id, status, company_bin, amount, term, purpose, name, email, phone, created_at, completed_at, files_count, report_text 
+        `SELECT session_id, status, company_bin, amount, term, purpose, name, email, phone, comment, created_at, completed_at, files_count, files_data, report_text, openai_response_id, openai_status 
          FROM reports 
          ORDER BY created_at DESC 
          LIMIT 100`
       )
       .all()
 
-    res.json(Array.isArray(rows) ? rows : [])
+    const list = Array.isArray(rows) ? rows : []
+    const refreshed = await Promise.all(list.map((row) => maybeUpdateReportFromOpenAI(row)))
+    res.json(refreshed)
   } catch (error) {
     console.error('❌ Ошибка получения списка отчётов', error)
     res.status(500).json({ ok: false, message: 'Не удалось получить отчёты.' })
@@ -781,21 +929,20 @@ app.get('/api/reports', async (_req, res) => {
 app.get('/api/reports/:sessionId', async (req, res) => {
   const { sessionId } = req.params
   try {
-    const rows = await db
+    const row = await db
       .prepare(
-        `SELECT session_id, status, company_bin, amount, term, purpose, name, email, phone, created_at, completed_at, files_count, files_data, report_text, tax_report_text, tax_status, tax_missing_periods, fs_report_text, fs_status, fs_missing_periods
+        `SELECT session_id, status, company_bin, amount, term, purpose, name, email, phone, comment, created_at, completed_at, files_count, files_data, report_text, tax_report_text, tax_status, tax_missing_periods, fs_report_text, fs_status, fs_missing_periods, openai_response_id, openai_status
          FROM reports 
          WHERE session_id = ?`
       )
-      .all(sessionId)
-
-    const row = Array.isArray(rows) ? rows[0] : null
+      .get(sessionId)
 
     if (!row) {
       return res.status(404).json({ ok: false, message: 'Отчёт не найден.' })
     }
 
-    res.json(row)
+    const syncedRow = await maybeUpdateReportFromOpenAI(row)
+    res.json(syncedRow || row)
   } catch (error) {
     console.error('❌ Ошибка получения отчёта', error)
     res.status(500).json({ ok: false, message: 'Не удалось получить отчёт.' })
@@ -810,6 +957,39 @@ app.get('/api/reports/:sessionId/messages', async (req, res) => {
   } catch (error) {
     console.error('❌ Ошибка получения сообщений', error)
     res.status(500).json({ ok: false, message: 'Не удалось получить сообщения.' })
+  }
+})
+
+app.delete('/api/reports/:sessionId', async (req, res) => {
+  const { sessionId } = req.params
+
+  if (!sessionId) {
+    return res.status(400).json({ ok: false, message: 'Не указан идентификатор сессии.' })
+  }
+
+  try {
+    const existing = await db
+      .prepare(`SELECT session_id FROM reports WHERE session_id = ?`)
+      .get(sessionId)
+
+    if (!existing) {
+      return res.status(404).json({ ok: false, message: 'Отчёт не найден.' })
+    }
+
+    await db.prepare(`DELETE FROM messages WHERE session_id = ?`).run(sessionId)
+    await db.prepare(`DELETE FROM files WHERE session_id = ?`).run(sessionId)
+    await db.prepare(`DELETE FROM reports WHERE session_id = ?`).run(sessionId)
+
+    conversationHistory.delete(sessionId)
+    sessionFiles.delete(sessionId)
+    runningStatementsSessions.delete(sessionId)
+    runningTaxSessions.delete(sessionId)
+    runningFsSessions.delete(sessionId)
+
+    return res.status(204).send()
+  } catch (error) {
+    console.error('❌ Ошибка удаления отчёта', error)
+    return res.status(500).json({ ok: false, message: 'Не удалось удалить отчёт.' })
   }
 })
 
