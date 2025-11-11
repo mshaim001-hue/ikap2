@@ -363,12 +363,26 @@ const listOpenAIResponses = async (limit = 20) => {
     },
   })
 
-  if (!response.ok) {
-    const body = await response.text()
-    throw new Error(`Failed to list responses: ${response.status} ${body}`)
+  const text = await response.text()
+  let data = null
+  try {
+    data = text ? JSON.parse(text) : null
+  } catch {
+    data = null
   }
 
-  const data = await response.json()
+  if (!response.ok) {
+    const error = new Error(
+      data?.error?.message || `Failed to list responses: ${response.status} ${text || ''}`.trim()
+    )
+    error.status = response.status
+    if (data?.error) {
+      error.code = data.error.code
+      error.type = data.error.type
+    }
+    throw error
+  }
+
   return Array.isArray(data?.data) ? data.data : []
 }
 
@@ -381,6 +395,13 @@ const findOpenAIResponseForSession = async (sessionId, attempts = 3, delayMs = 2
         return match
       }
     } catch (error) {
+      if (error.code === 'missing_scope') {
+        console.warn(
+          '⚠️ Текущий API-ключ OpenAI не позволяет запрашивать список responses. Статус будет обновлён после нового запроса с идентификатором.',
+          { sessionId }
+        )
+        return null
+      }
       console.error('⚠️ Не удалось получить список ответов OpenAI', {
         sessionId,
         error: error.message,
