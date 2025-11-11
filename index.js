@@ -18,7 +18,7 @@ const upload = multer({
 })
 
 console.log('Loading Agents SDK...')
-const { codeInterpreterTool } = require('@openai/agents')
+const { Agent, Runner, codeInterpreterTool } = require('@openai/agents')
 const { z } = require('zod')
 console.log('Agents SDK loaded successfully')
 
@@ -73,6 +73,8 @@ const openaiClient = new OpenAI({
   timeout: OPENAI_TIMEOUT_MS,
   maxRetries: Number(process.env.OPENAI_MAX_RETRIES || 2),
 })
+
+const analysisRunner = new Runner({})
 
 // Инициализация БД (Postgres/SQLite) и создание схемы
 const db = createDb()
@@ -646,6 +648,24 @@ const defaultUserPrompt = `${financialAnalystInstructions}
 
 Проанализируй прикреплённые банковские выписки и подготовь отчёт строго по указанной выше инструкции.`
 
+const createFinancialAnalystAgent = (fileIds = []) => {
+  const toolConfig = {
+    container: { type: 'auto' },
+  }
+
+  if (Array.isArray(fileIds) && fileIds.length > 0) {
+    toolConfig.container.file_ids = fileIds
+  }
+
+  return new Agent({
+    name: 'Financial Analyst',
+    instructions: financialAnalystInstructions,
+    model: 'gpt-5',
+    modelSettings: { store: true },
+    tools: [codeInterpreterTool(toolConfig)],
+  })
+}
+
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))
 
 const normalizeMetadata = (raw) => {
@@ -835,131 +855,160 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
       .filter(Boolean)
       .join('\n\n')
 
-    const openaiRequestPayload = {
-      model: 'gpt-5',
-      metadata: {
-        sessionId,
-      },
-      input: [
-        {
-          role: 'user',
-          content: [
-            {
-              type: 'input_text',
-              text: combinedPrompt,
-            },
-            ...attachments.map((attachment) => ({
-              type: 'input_file',
-              file_id: attachment.file_id,
-            })),
-          ],
-        },
-      ],
-      tools: [
-        {
-          type: 'code_interpreter',
-          container: { type: 'auto' },
-        },
-      ],
-    }
+    const fileIds = attachments.map((attachment) => attachment.file_id)
+    const analystAgent = createFinancialAnalystAgent(fileIds)
 
-    console.log('🤖 Отправляем запрос в OpenAI Responses API', {
-      model: openaiRequestPayload.model,
-      attachmentCount: attachments.length,
+    const agentInput = [
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'input_text',
+            text: combinedPrompt,
+          },
+        ],
+      },
+    ]
+
+    console.log('🤖 Запускаем финансового аналитика через Runner', {
+      fileIds: fileIds.length,
       promptPreview: combinedPrompt.slice(0, 200),
     })
 
-    let analysisResponse
-    try {
-      analysisResponse = await openaiClient.responses.create(openaiRequestPayload, {
-        timeout: OPENAI_TIMEOUT_MS,
-      })
-    } catch (error) {
-      if (error?.response?.id) {
-        analysisResponse = error.response
-        console.warn('⚠️ OpenAI запрос превысил таймаут при создании ответа', {
-          responseId: analysisResponse.id,
-          status: analysisResponse.status,
-        })
-      } else if (error?.message?.toLowerCase()?.includes('timed out')) {
-        console.warn('⚠️ OpenAI запрос превысил таймаут и не вернул идентификатор ответа', {
-          sessionId,
-          error: error.message,
-        })
-        analysisResponse = await findOpenAIResponseForSession(sessionId, 5, 2000)
-        if (!analysisResponse?.id) {
-          await upsertReport(sessionId, {
-            status: 'generating',
-            reportText: null,
-            filesCount: files.length,
-            filesData: JSON.stringify(
-              files.map((file) => ({
-                name: file.originalname,
-                size: file.size,
-                mime: file.mimetype,
-              }))
-            ),
-            completed: null,
-            comment,
-            openaiStatus: 'generating',
-          })
-
-          const progress = await getSessionProgress(sessionId)
-
-          return res.status(202).json({
-            ok: true,
-            sessionId,
-            status: 'generating',
-            openaiStatus: 'generating',
-            message: 'Анализ запущен. Обновите историю позже, чтобы увидеть результат.',
-            data: {
-              progress,
-            },
-            completed: false,
-          })
-        }
-      } else {
-        throw error
-      }
-    }
-
-    if (!analysisResponse?.id) {
-      throw new Error('Не удалось получить идентификатор ответа OpenAI.')
-    }
-
-    console.log('✅ Ответ OpenAI инициирован', {
-      id: analysisResponse.id,
-      status: analysisResponse.status,
-      model: analysisResponse.model,
+    const agentRunPromise = analysisRunner.run(analystAgent, agentInput)
+    const runnerTimeoutMs = OPENAI_TIMEOUT_MS
+    let timeoutHandle = null
+    const timeoutPromise = new Promise((_, reject) => {
+      timeoutHandle = setTimeout(() => {
+        reject(new Error(`Agent timeout (${Math.round(runnerTimeoutMs / 1000)}s)`))
+      }, runnerTimeoutMs)
     })
 
-    const openaiStatus = analysisResponse.status
-    const reportStatus = mapOpenAIStatusToReportStatus(openaiStatus)
-    let outputText = null
-    let completedAt = null
-
-    if (reportStatus === 'completed') {
-      outputText = extractOutputText(analysisResponse) || null
-      completedAt = new Date().toISOString()
-      if (outputText) {
-        history.push({ role: 'assistant', content: [{ type: 'text', text: outputText }] })
-        await saveMessageToDB(
-          sessionId,
-          'assistant',
-          [{ type: 'text', text: outputText }],
-          history.length
-        )
+    let runResult
+    try {
+      runResult = await Promise.race([agentRunPromise, timeoutPromise])
+    } catch (error) {
+      if (error.message?.includes('timeout')) {
+        console.error('⏰ Финансовый агент превысил таймаут', { sessionId })
+        throw new Error('Анализ занял слишком много времени. Попробуйте повторить запрос позже.')
       }
-    } else if (reportStatus === 'failed') {
-      outputText =
-        analysisResponse.last_error?.message ||
-        'OpenAI вернул ошибку при запуске анализа. Повторите попытку позже.'
-      completedAt = new Date().toISOString()
+      throw error
+    } finally {
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle)
+      }
     }
 
+    if (!runResult) {
+      throw new Error('Анализ не вернул результат.')
+    }
+
+    let outputText = runResult.finalOutput
+
+    if (outputText && typeof outputText === 'object') {
+      try {
+        const serialized = JSON.stringify(outputText)
+        outputText = serialized && serialized !== '{}' ? serialized : null
+      } catch {
+        outputText = null
+      }
+    }
+
+    if (typeof outputText === 'string') {
+      outputText = outputText.trim()
+    }
+
+    if (!outputText) {
+      outputText =
+        extractAssistantAnswer(Array.isArray(runResult.newItems) ? runResult.newItems : []) ||
+        extractAssistantAnswer(Array.isArray(runResult.history) ? runResult.history : []) ||
+        ''
+    }
+
+    const rawNewItems = Array.isArray(runResult.newItems)
+      ? runResult.newItems.map((item) => item?.rawItem || item)
+      : []
+
+    const historyLengthBefore = history.length
+    if (rawNewItems.length > 0) {
+      history.push(...rawNewItems)
+    }
+
+    let assistantAnswerPersisted = false
+
+    for (let index = 0; index < rawNewItems.length; index += 1) {
+      const item = rawNewItems[index]
+      const role = item?.role
+      if (role === 'assistant' || role === 'user') {
+        try {
+          await saveMessageToDB(sessionId, role, item.content, historyLengthBefore + index + 1)
+        } catch (dbError) {
+          if (
+            dbError.code === 'XX000' ||
+            dbError.message?.includes('db_termination') ||
+            dbError.message?.includes('shutdown')
+          ) {
+            console.error(
+              '⚠️ БД соединение разорвано при сохранении сообщения агента. Продолжаем работу без сохранения в БД.'
+            )
+          } else {
+            console.error(
+              '⚠️ Ошибка сохранения сообщения агента в БД (продолжаем работу):',
+              dbError.message
+            )
+          }
+        }
+
+        if (role === 'assistant' && !assistantAnswerPersisted) {
+          let contentText = ''
+          if (typeof item.content === 'string') {
+            contentText = item.content.trim()
+          } else if (Array.isArray(item.content)) {
+            contentText = item.content
+              .map((chunk) => contentItemToString(chunk))
+              .filter(Boolean)
+              .join('\n')
+              .trim()
+          }
+
+          if (contentText) {
+            assistantAnswerPersisted = true
+          }
+        }
+      }
+    }
+
+    if (!assistantAnswerPersisted && outputText) {
+      const assistantMessage = {
+        role: 'assistant',
+        content: [{ type: 'text', text: outputText }],
+      }
+      history.push(assistantMessage)
+      try {
+        await saveMessageToDB(sessionId, 'assistant', assistantMessage.content, history.length)
+      } catch (dbError) {
+        if (
+          dbError.code === 'XX000' ||
+          dbError.message?.includes('db_termination') ||
+          dbError.message?.includes('shutdown')
+        ) {
+          console.error(
+            '⚠️ БД соединение разорвано при сохранении сообщения (fallback). Продолжаем работу без сохранения в БД.'
+          )
+        } else {
+          console.error(
+            '⚠️ Ошибка сохранения fallback-сообщения агента в БД (продолжаем работу):',
+            dbError.message
+          )
+        }
+      }
+    }
+
+    const completedAt = new Date().toISOString()
+
     await upsertReport(sessionId, {
-      status: reportStatus,
-      reportText: outputText,
+      status: 'completed',
+      reportText: outputText || null,
       filesCount: files.length,
       filesData: JSON.stringify(
         files.map((file) => ({
@@ -970,33 +1019,30 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
       ),
       completed: completedAt,
       comment,
-      openaiResponseId: analysisResponse.id,
-      openaiStatus,
+      openaiResponseId: runResult.lastResponseId || null,
+      openaiStatus: 'completed',
     })
 
     const progress = await getSessionProgress(sessionId)
 
-    console.log('📦 Анализ зарегистрирован', {
+    console.log('📦 Анализ завершён', {
       sessionId,
       durationMs: Date.now() - startedAt.getTime(),
-      openaiStatus,
+      responseId: runResult.lastResponseId,
       progress,
     })
 
     return res.json({
       ok: true,
       sessionId,
-      status: reportStatus,
-      openaiStatus,
-      message:
-        reportStatus === 'completed'
-          ? outputText || 'От OpenAI не пришло текстового ответа.'
-          : 'Анализ запущен. Ответ появится после обновления истории.',
+      status: 'completed',
+      openaiStatus: 'completed',
+      message: outputText || 'Анализ завершён, но текст отчёта отсутствует.',
       data: {
         progress,
-        usage: analysisResponse.usage,
+        usage: runResult.usage,
       },
-      completed: reportStatus === 'completed',
+      completed: true,
     })
   } catch (error) {
     console.error('❌ Ошибка анализа выписок', {
