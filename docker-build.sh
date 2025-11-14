@@ -11,9 +11,10 @@ VERSION="${VERSION:-latest}"
 FULL_IMAGE_NAME="${DOCKER_USERNAME}/${IMAGE_NAME}:${VERSION}"
 
 echo "🐳 Сборка Docker образа: ${FULL_IMAGE_NAME}"
+echo "📦 Платформа: linux/amd64 (для Render.com)"
 
-# Сборка образа
-docker build -t "${FULL_IMAGE_NAME}" .
+# Сборка образа для платформы linux/amd64 (требуется для Render.com)
+docker build --platform linux/amd64 -t "${FULL_IMAGE_NAME}" .
 
 echo "✅ Образ собран успешно"
 
