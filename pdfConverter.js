@@ -131,11 +131,18 @@ async function convertPdfToJsonViaPython(pdfBuffer, filename, customPdfServicePa
     }
 
     return new Promise((resolve, reject) => {
-      const pythonProcess = spawn(pythonExecutable, [pythonScript, tempPdfPath, '--json'], {
+      // Проверяем, есть ли виртуальное окружение
+      const venvPython = path.join(resolvedPdfServicePath, 'venv', 'bin', 'python3')
+      const actualPythonExecutable = fs.existsSync(venvPython) ? venvPython : pythonExecutable
+      
+      console.log(`🐍 Используем Python: ${actualPythonExecutable}`)
+      
+      const pythonProcess = spawn(actualPythonExecutable, [pythonScript, tempPdfPath, '--json'], {
         cwd: resolvedPdfServicePath,
         env: {
           ...process.env,
-          PYTHONUNBUFFERED: '1'
+          PYTHONUNBUFFERED: '1',
+          VIRTUAL_ENV: fs.existsSync(venvPython) ? path.join(resolvedPdfServicePath, 'venv') : undefined
         }
       })
 

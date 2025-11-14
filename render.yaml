@@ -8,7 +8,12 @@ services:
       npm install &&
       npm run build &&
       python3 --version &&
-      cd pdf && python3 -m pip install --upgrade pip && python3 -m pip install -r requirements.txt
+      cd pdf &&
+      python3 -m venv venv &&
+      source venv/bin/activate &&
+      pip install --upgrade pip setuptools wheel &&
+      pip install -r requirements.txt &&
+      echo "Python dependencies installed successfully in venv"
     startCommand: npm start
     envVars:
       # Обязательные переменные (нужно установить вручную в панели Render)
@@ -28,7 +33,7 @@ services:
       - key: PDF_SERVICE_PATH
         value: /opt/render/project/src/pdf
       - key: PYTHON_PATH
-        value: python3
+        value: /opt/render/project/src/pdf/venv/bin/python3
       
       # Опциональные настройки
       - key: NODE_ENV
