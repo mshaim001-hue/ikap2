@@ -148,23 +148,29 @@ async function convertPdfToJsonViaPython(pdfBuffer, filename, customPdfServicePa
       } else {
         // Production на Render.com - используем системный Python с --user установкой
         // PYTHONPATH должен включать ~/.local/lib/python3.X/site-packages
-        const pythonVersion = process.env.PYTHON_VERSION || '3.12'
-        const userSitePackages = [
-          `/opt/render/.local/lib/python${pythonVersion}/site-packages`,
-          `/opt/render/.local/lib/python3.12/site-packages`,
-          `/opt/render/.local/lib/python3.11/site-packages`,
-          `/opt/render/.local/lib/python3.10/site-packages`,
-          `/opt/render/.local/lib/python3.9/site-packages`
-        ].filter(p => fs.existsSync(p))
+        // Пробуем найти user site-packages для разных версий Python
+        const possiblePaths = [
+          '/opt/render/.local/lib/python3.12/site-packages',
+          '/opt/render/.local/lib/python3.11/site-packages',
+          '/opt/render/.local/lib/python3.10/site-packages',
+          '/opt/render/.local/lib/python3.9/site-packages',
+          '/opt/render/.local/lib/python3.8/site-packages',
+          process.env.HOME ? `${process.env.HOME}/.local/lib/python3.12/site-packages` : null,
+          process.env.HOME ? `${process.env.HOME}/.local/lib/python3.11/site-packages` : null,
+          process.env.HOME ? `${process.env.HOME}/.local/lib/python3.10/site-packages` : null
+        ].filter(Boolean)
         
-        if (userSitePackages.length > 0) {
-          pythonEnv.PYTHONPATH = [
-            ...(process.env.PYTHONPATH ? process.env.PYTHONPATH.split(':') : []),
-            ...userSitePackages
-          ].join(':')
+        const existingPaths = possiblePaths.filter(p => fs.existsSync(p))
+        
+        if (existingPaths.length > 0) {
+          const currentPythonPath = process.env.PYTHONPATH ? process.env.PYTHONPATH.split(':') : []
+          pythonEnv.PYTHONPATH = [...currentPythonPath, ...existingPaths].join(':')
           console.log(`✅ Настроен PYTHONPATH для --user установки: ${pythonEnv.PYTHONPATH}`)
         } else {
-          console.log(`⚠️ Не найдены user site-packages, но продолжаем...`)
+          // Если не нашли, пробуем определить через python -c "import site; print(site.getusersitepackages())"
+          console.log(`⚠️ Не найдены user site-packages автоматически, используем системный Python`)
+          console.log(`   HOME: ${process.env.HOME}`)
+          console.log(`   Возможные пути проверены: ${possiblePaths.slice(0, 3).join(', ')}...`)
         }
         
         console.log(`🐍 Используем системный Python: ${actualPythonExecutable}`)
