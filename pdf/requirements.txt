@@ -1,0 +1,15 @@
+# Основные зависимости для веб-приложения
+fastapi==0.115.0
+uvicorn[standard]==0.29.0
+python-multipart==0.0.9
+pydantic==2.7.1
+
+# Обработка данных
+pandas==2.2.2
+openpyxl==3.1.5
+
+# HTTP клиент для REST API
+requests>=2.27.0
+
+# Adobe PDF Services API (обязательно)
+pdfservices-sdk
