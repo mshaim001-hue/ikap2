@@ -228,62 +228,10 @@ async function convertPdfToJsonViaPython(pdfBuffer, filename, customPdfServicePa
         console.log(`✅ Найдено виртуальное окружение: ${actualPythonExecutable}`)
         runPythonConversion()
       } else {
-        // Production на Render.com - определяем путь к user site-packages динамически
-        console.log(`🔍 Определяем путь к user site-packages...`)
-        
-        const checkPython = spawn(pythonExecutable, ['-c', 'import site; print(site.getusersitepackages())'], {
-          env: { ...process.env, PYTHONUNBUFFERED: '1' }
-        })
-        
-        let userSiteOutput = ''
-        let userSiteError = ''
-        
-        checkPython.stdout.on('data', (data) => {
-          userSiteOutput += data.toString()
-        })
-        
-        checkPython.stderr.on('data', (data) => {
-          userSiteError += data.toString()
-        })
-        
-        checkPython.on('close', (code) => {
-          if (code === 0 && userSiteOutput.trim()) {
-            const userSitePath = userSiteOutput.trim()
-            if (fs.existsSync(userSitePath)) {
-              const currentPythonPath = process.env.PYTHONPATH ? process.env.PYTHONPATH.split(':') : []
-              pythonEnv.PYTHONPATH = [...currentPythonPath, userSitePath].join(':')
-              console.log(`✅ Настроен PYTHONPATH: ${pythonEnv.PYTHONPATH}`)
-            } else {
-              console.log(`⚠️ Python вернул путь, но он не существует: ${userSitePath}`)
-            }
-          } else {
-            console.log(`⚠️ Не удалось определить user site-packages: ${userSiteError || 'unknown error'}`)
-            // Пробуем стандартные пути
-            const possiblePaths = [
-              '/opt/render/.local/lib/python3.12/site-packages',
-              '/opt/render/.local/lib/python3.11/site-packages',
-              '/opt/render/.local/lib/python3.10/site-packages',
-              process.env.HOME ? `${process.env.HOME}/.local/lib/python3.12/site-packages` : null,
-              process.env.HOME ? `${process.env.HOME}/.local/lib/python3.11/site-packages` : null
-            ].filter(Boolean)
-            
-            const existingPaths = possiblePaths.filter(p => fs.existsSync(p))
-            if (existingPaths.length > 0) {
-              const currentPythonPath = process.env.PYTHONPATH ? process.env.PYTHONPATH.split(':') : []
-              pythonEnv.PYTHONPATH = [...currentPythonPath, ...existingPaths].join(':')
-              console.log(`✅ Настроен PYTHONPATH (fallback): ${pythonEnv.PYTHONPATH}`)
-            }
-          }
-          
-          // Запускаем конвертацию после настройки PYTHONPATH
-          runPythonConversion()
-        })
-        
-        checkPython.on('error', (error) => {
-          console.error('❌ Ошибка проверки user site-packages:', error.message)
-          // Продолжаем без настройки PYTHONPATH
-          runPythonConversion()
-        })
+        // Production (Docker или Render.com без venv)
+        // В Docker все зависимости установлены глобально, просто запускаем
+        console.log(`🐍 Используем системный Python: ${actualPythonExecutable}`)
+        runPythonConversion()
       }
     })
   } catch (error) {

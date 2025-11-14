@@ -1,18 +1,10 @@
 services:
   - type: web
     name: ikap-backend
-    env: node
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
     region: oregon
     plan: starter
-    buildCommand: |
-      npm install &&
-      npm run build &&
-      python3 --version &&
-      cd pdf &&
-      python3 -m pip install --user --upgrade pip setuptools wheel &&
-      python3 -m pip install --user -r requirements.txt &&
-      echo "Python dependencies installed successfully (--user)"
-    startCommand: npm start
     envVars:
       # Обязательные переменные (нужно установить вручную в панели Render)
       - key: OPENAI_API_KEY
@@ -27,9 +19,9 @@ services:
         sync: false
       
       # Настройки PDF-сервиса
-      # На Render.com путь будет автоматически определен как /opt/render/project/src/pdf
+      # В Docker путь будет /app/pdf
       - key: PDF_SERVICE_PATH
-        value: /opt/render/project/src/pdf
+        value: /app/pdf
       - key: PYTHON_PATH
         value: python3
       
