@@ -15,9 +15,10 @@ services:
       npm run build &&
       python3 --version &&
       cd pdf &&
-      sudo python3 -m pip install --upgrade pip setuptools wheel &&
-      sudo python3 -m pip install -r requirements.txt &&
-      echo "Python dependencies installed successfully (global)"
+      python3 -m pip install --user --upgrade pip setuptools wheel &&
+      python3 -m pip install --user -r requirements.txt &&
+      python3 -c "import site; print('User site-packages:', site.getusersitepackages())" &&
+      echo "Python dependencies installed successfully (--user)"
     startCommand: npm start
     envVars:
       # Обязательные переменные (нужно установить вручную в панели Render)
