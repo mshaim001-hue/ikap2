@@ -33,7 +33,9 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY
 // Настройка CORS для GitHub Pages
 const allowedOrigins = [
   'http://localhost:3000',
+  'http://localhost:5173',
   'http://localhost:8787',
+  'https://mshaim001-hue.github.io',
   'https://*.github.io',
   'https://*.githubpages.io',
   process.env.FRONTEND_URL
@@ -46,20 +48,31 @@ app.use(cors({
     
     // Проверяем совпадение с разрешенными источниками
     const isAllowed = allowedOrigins.some(allowed => {
+      // Точное совпадение
+      if (origin === allowed) return true
+      
+      // Проверка паттернов с *
       if (allowed.includes('*')) {
-        const pattern = allowed.replace('*', '.*')
+        // Заменяем * на .* и экранируем точки
+        const pattern = allowed
+          .replace(/\*/g, '.*')
+          .replace(/\./g, '\\.')
         return new RegExp(`^${pattern}$`).test(origin)
       }
-      return origin === allowed
+      
+      return false
     })
     
     if (isAllowed || allowedOrigins.length === 0) {
       callback(null, true)
     } else {
+      console.log(`❌ CORS blocked: ${origin} not in allowed origins:`, allowedOrigins)
       callback(new Error('Not allowed by CORS'))
     }
   },
-  credentials: true
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }))
 app.use(express.json({ limit: '10mb' }))
 
