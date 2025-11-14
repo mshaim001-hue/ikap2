@@ -7,7 +7,8 @@ services:
     buildCommand: |
       npm install &&
       npm run build &&
-      cd pdf && pip3 install -r requirements.txt || echo "Python dependencies installation failed, but continuing..."
+      python3 --version &&
+      cd pdf && python3 -m pip install --upgrade pip && python3 -m pip install -r requirements.txt
     startCommand: npm start
     envVars:
       # Обязательные переменные (нужно установить вручную в панели Render)
