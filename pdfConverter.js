@@ -131,7 +131,6 @@ async function convertPdfToJsonViaPython(pdfBuffer, filename, customPdfServicePa
     }
 
     return new Promise((resolve, reject) => {
-      // На Render.com используем системный Python с --user установкой
       // Проверяем, есть ли виртуальное окружение (для локальной разработки)
       const venvPython = path.join(resolvedPdfServicePath, 'venv', 'bin', 'python3')
       const venvPythonAlt = path.join(resolvedPdfServicePath, 'venv', 'bin', 'python')
@@ -140,120 +139,152 @@ async function convertPdfToJsonViaPython(pdfBuffer, filename, customPdfServicePa
       let actualPythonExecutable = pythonExecutable
       let pythonEnv = { ...process.env, PYTHONUNBUFFERED: '1' }
       
-      if (venvExists) {
-        // Локальная разработка с venv
-        actualPythonExecutable = fs.existsSync(venvPython) ? venvPython : venvPythonAlt
-        pythonEnv.VIRTUAL_ENV = path.join(resolvedPdfServicePath, 'venv')
-        console.log(`✅ Найдено виртуальное окружение: ${actualPythonExecutable}`)
-      } else {
-        // Production на Render.com - используем системный Python с --user установкой
-        // PYTHONPATH должен включать ~/.local/lib/python3.X/site-packages
-        // Пробуем найти user site-packages для разных версий Python
-        const possiblePaths = [
-          '/opt/render/.local/lib/python3.12/site-packages',
-          '/opt/render/.local/lib/python3.11/site-packages',
-          '/opt/render/.local/lib/python3.10/site-packages',
-          '/opt/render/.local/lib/python3.9/site-packages',
-          '/opt/render/.local/lib/python3.8/site-packages',
-          process.env.HOME ? `${process.env.HOME}/.local/lib/python3.12/site-packages` : null,
-          process.env.HOME ? `${process.env.HOME}/.local/lib/python3.11/site-packages` : null,
-          process.env.HOME ? `${process.env.HOME}/.local/lib/python3.10/site-packages` : null
-        ].filter(Boolean)
+      // Функция для запуска Python процесса конвертации
+      const runPythonConversion = () => {
+        console.log(`🐍 Используем Python: ${actualPythonExecutable}`)
         
-        const existingPaths = possiblePaths.filter(p => fs.existsSync(p))
-        
-        if (existingPaths.length > 0) {
-          const currentPythonPath = process.env.PYTHONPATH ? process.env.PYTHONPATH.split(':') : []
-          pythonEnv.PYTHONPATH = [...currentPythonPath, ...existingPaths].join(':')
-          console.log(`✅ Настроен PYTHONPATH для --user установки: ${pythonEnv.PYTHONPATH}`)
-        } else {
-          // Если не нашли, пробуем определить через python -c "import site; print(site.getusersitepackages())"
-          console.log(`⚠️ Не найдены user site-packages автоматически, используем системный Python`)
-          console.log(`   HOME: ${process.env.HOME}`)
-          console.log(`   Возможные пути проверены: ${possiblePaths.slice(0, 3).join(', ')}...`)
-        }
-        
-        console.log(`🐍 Используем системный Python: ${actualPythonExecutable}`)
-      }
-      
-      console.log(`🐍 Используем Python: ${actualPythonExecutable}`)
-      
-      const pythonProcess = spawn(actualPythonExecutable, [pythonScript, tempPdfPath, '--json'], {
-        cwd: resolvedPdfServicePath,
-        env: pythonEnv
-      })
+        const pythonProcess = spawn(actualPythonExecutable, [pythonScript, tempPdfPath, '--json'], {
+          cwd: resolvedPdfServicePath,
+          env: pythonEnv
+        })
 
-      let stdout = ''
-      let stderr = ''
+        let stdout = ''
+        let stderr = ''
 
-      pythonProcess.stdout.on('data', (data) => {
-        stdout += data.toString()
-      })
+        pythonProcess.stdout.on('data', (data) => {
+          stdout += data.toString()
+        })
 
-      pythonProcess.stderr.on('data', (data) => {
-        stderr += data.toString()
-      })
+        pythonProcess.stderr.on('data', (data) => {
+          stderr += data.toString()
+        })
 
-      pythonProcess.on('close', async (code) => {
-        // Удаляем временный файл
-        try {
-          await unlink(tempPdfPath)
-        } catch (err) {
-          console.warn('⚠️ Не удалось удалить временный файл:', err.message)
-        }
+        pythonProcess.on('close', async (code) => {
+          // Удаляем временный файл
+          try {
+            await unlink(tempPdfPath)
+          } catch (err) {
+            console.warn('⚠️ Не удалось удалить временный файл:', err.message)
+          }
 
-        if (code !== 0) {
-          console.error('❌ Python скрипт завершился с ошибкой:', stderr)
-          reject(new Error(`Python скрипт завершился с кодом ${code}: ${stderr}`))
-          return
-        }
-
-        try {
-          // Проверяем, есть ли сообщение об отсутствии транзакций
-          const stdoutTrimmed = stdout.trim()
-          if (stdoutTrimmed === '' || stdoutTrimmed.includes('No credit rows found')) {
-            console.log('⚠️ В PDF файле не найдено операций по кредиту')
-            // Возвращаем пустой результат
-            resolve([{
-              source_file: filename,
-              metadata: {},
-              transactions: [],
-              error: 'Не найдено операций по кредиту в PDF файле'
-            }])
+          if (code !== 0) {
+            console.error('❌ Python скрипт завершился с ошибкой:', stderr)
+            reject(new Error(`Python скрипт завершился с кодом ${code}: ${stderr}`))
             return
           }
 
-          // Парсим JSON из stdout
-          const result = JSON.parse(stdoutTrimmed)
-          console.log(`✅ PDF конвертирован в JSON: найдено ${Array.isArray(result) ? result.length : 1} файл(ов)`)
-          resolve(Array.isArray(result) ? result : [result])
-        } catch (parseError) {
-          console.error('❌ Ошибка парсинга JSON:', parseError.message)
-          console.error('Stdout:', stdout)
-          // Если это не JSON, но код успешный - возможно, нет транзакций
-          if (code === 0 && stdout.trim().includes('No credit rows found')) {
-            resolve([{
-              source_file: filename,
-              metadata: {},
-              transactions: [],
-              error: 'Не найдено операций по кредиту в PDF файле'
-            }])
-          } else {
-            reject(new Error(`Не удалось распарсить JSON ответ: ${parseError.message}`))
-          }
-        }
-      })
+          try {
+            // Проверяем, есть ли сообщение об отсутствии транзакций
+            const stdoutTrimmed = stdout.trim()
+            if (stdoutTrimmed === '' || stdoutTrimmed.includes('No credit rows found')) {
+              console.log('⚠️ В PDF файле не найдено операций по кредиту')
+              // Возвращаем пустой результат
+              resolve([{
+                source_file: filename,
+                metadata: {},
+                transactions: [],
+                error: 'Не найдено операций по кредиту в PDF файле'
+              }])
+              return
+            }
 
-      pythonProcess.on('error', async (error) => {
-        // Удаляем временный файл при ошибке
-        try {
-          await unlink(tempPdfPath)
-        } catch (err) {
-          // Игнорируем ошибку удаления
-        }
-        console.error('❌ Ошибка запуска Python процесса:', error.message)
-        reject(new Error(`Не удалось запустить Python скрипт: ${error.message}`))
-      })
+            // Парсим JSON из stdout
+            const result = JSON.parse(stdoutTrimmed)
+            console.log(`✅ PDF конвертирован в JSON: найдено ${Array.isArray(result) ? result.length : 1} файл(ов)`)
+            resolve(Array.isArray(result) ? result : [result])
+          } catch (parseError) {
+            console.error('❌ Ошибка парсинга JSON:', parseError.message)
+            console.error('Stdout:', stdout)
+            // Если это не JSON, но код успешный - возможно, нет транзакций
+            if (code === 0 && stdout.trim().includes('No credit rows found')) {
+              resolve([{
+                source_file: filename,
+                metadata: {},
+                transactions: [],
+                error: 'Не найдено операций по кредиту в PDF файле'
+              }])
+            } else {
+              reject(new Error(`Не удалось распарсить JSON ответ: ${parseError.message}`))
+            }
+          }
+        })
+
+        pythonProcess.on('error', async (error) => {
+          // Удаляем временный файл при ошибке
+          try {
+            await unlink(tempPdfPath)
+          } catch (err) {
+            // Игнорируем ошибку удаления
+          }
+          console.error('❌ Ошибка запуска Python процесса:', error.message)
+          reject(new Error(`Не удалось запустить Python скрипт: ${error.message}`))
+        })
+      }
+      
+      if (venvExists) {
+        // Локальная разработка с venv - запускаем сразу
+        actualPythonExecutable = fs.existsSync(venvPython) ? venvPython : venvPythonAlt
+        pythonEnv.VIRTUAL_ENV = path.join(resolvedPdfServicePath, 'venv')
+        console.log(`✅ Найдено виртуальное окружение: ${actualPythonExecutable}`)
+        runPythonConversion()
+      } else {
+        // Production на Render.com - определяем путь к user site-packages динамически
+        console.log(`🔍 Определяем путь к user site-packages...`)
+        
+        const checkPython = spawn(pythonExecutable, ['-c', 'import site; print(site.getusersitepackages())'], {
+          env: { ...process.env, PYTHONUNBUFFERED: '1' }
+        })
+        
+        let userSiteOutput = ''
+        let userSiteError = ''
+        
+        checkPython.stdout.on('data', (data) => {
+          userSiteOutput += data.toString()
+        })
+        
+        checkPython.stderr.on('data', (data) => {
+          userSiteError += data.toString()
+        })
+        
+        checkPython.on('close', (code) => {
+          if (code === 0 && userSiteOutput.trim()) {
+            const userSitePath = userSiteOutput.trim()
+            if (fs.existsSync(userSitePath)) {
+              const currentPythonPath = process.env.PYTHONPATH ? process.env.PYTHONPATH.split(':') : []
+              pythonEnv.PYTHONPATH = [...currentPythonPath, userSitePath].join(':')
+              console.log(`✅ Настроен PYTHONPATH: ${pythonEnv.PYTHONPATH}`)
+            } else {
+              console.log(`⚠️ Python вернул путь, но он не существует: ${userSitePath}`)
+            }
+          } else {
+            console.log(`⚠️ Не удалось определить user site-packages: ${userSiteError || 'unknown error'}`)
+            // Пробуем стандартные пути
+            const possiblePaths = [
+              '/opt/render/.local/lib/python3.12/site-packages',
+              '/opt/render/.local/lib/python3.11/site-packages',
+              '/opt/render/.local/lib/python3.10/site-packages',
+              process.env.HOME ? `${process.env.HOME}/.local/lib/python3.12/site-packages` : null,
+              process.env.HOME ? `${process.env.HOME}/.local/lib/python3.11/site-packages` : null
+            ].filter(Boolean)
+            
+            const existingPaths = possiblePaths.filter(p => fs.existsSync(p))
+            if (existingPaths.length > 0) {
+              const currentPythonPath = process.env.PYTHONPATH ? process.env.PYTHONPATH.split(':') : []
+              pythonEnv.PYTHONPATH = [...currentPythonPath, ...existingPaths].join(':')
+              console.log(`✅ Настроен PYTHONPATH (fallback): ${pythonEnv.PYTHONPATH}`)
+            }
+          }
+          
+          // Запускаем конвертацию после настройки PYTHONPATH
+          runPythonConversion()
+        })
+        
+        checkPython.on('error', (error) => {
+          console.error('❌ Ошибка проверки user site-packages:', error.message)
+          // Продолжаем без настройки PYTHONPATH
+          runPythonConversion()
+        })
+      }
     })
   } catch (error) {
     // Удаляем временный файл при ошибке
