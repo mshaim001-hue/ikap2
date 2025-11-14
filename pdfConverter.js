@@ -131,19 +131,50 @@ async function convertPdfToJsonViaPython(pdfBuffer, filename, customPdfServicePa
     }
 
     return new Promise((resolve, reject) => {
-      // Проверяем, есть ли виртуальное окружение
+      // На Render.com используем системный Python с --user установкой
+      // Проверяем, есть ли виртуальное окружение (для локальной разработки)
       const venvPython = path.join(resolvedPdfServicePath, 'venv', 'bin', 'python3')
-      const actualPythonExecutable = fs.existsSync(venvPython) ? venvPython : pythonExecutable
+      const venvPythonAlt = path.join(resolvedPdfServicePath, 'venv', 'bin', 'python')
+      const venvExists = fs.existsSync(venvPython) || fs.existsSync(venvPythonAlt)
+      
+      let actualPythonExecutable = pythonExecutable
+      let pythonEnv = { ...process.env, PYTHONUNBUFFERED: '1' }
+      
+      if (venvExists) {
+        // Локальная разработка с venv
+        actualPythonExecutable = fs.existsSync(venvPython) ? venvPython : venvPythonAlt
+        pythonEnv.VIRTUAL_ENV = path.join(resolvedPdfServicePath, 'venv')
+        console.log(`✅ Найдено виртуальное окружение: ${actualPythonExecutable}`)
+      } else {
+        // Production на Render.com - используем системный Python с --user установкой
+        // PYTHONPATH должен включать ~/.local/lib/python3.X/site-packages
+        const pythonVersion = process.env.PYTHON_VERSION || '3.12'
+        const userSitePackages = [
+          `/opt/render/.local/lib/python${pythonVersion}/site-packages`,
+          `/opt/render/.local/lib/python3.12/site-packages`,
+          `/opt/render/.local/lib/python3.11/site-packages`,
+          `/opt/render/.local/lib/python3.10/site-packages`,
+          `/opt/render/.local/lib/python3.9/site-packages`
+        ].filter(p => fs.existsSync(p))
+        
+        if (userSitePackages.length > 0) {
+          pythonEnv.PYTHONPATH = [
+            ...(process.env.PYTHONPATH ? process.env.PYTHONPATH.split(':') : []),
+            ...userSitePackages
+          ].join(':')
+          console.log(`✅ Настроен PYTHONPATH для --user установки: ${pythonEnv.PYTHONPATH}`)
+        } else {
+          console.log(`⚠️ Не найдены user site-packages, но продолжаем...`)
+        }
+        
+        console.log(`🐍 Используем системный Python: ${actualPythonExecutable}`)
+      }
       
       console.log(`🐍 Используем Python: ${actualPythonExecutable}`)
       
       const pythonProcess = spawn(actualPythonExecutable, [pythonScript, tempPdfPath, '--json'], {
         cwd: resolvedPdfServicePath,
-        env: {
-          ...process.env,
-          PYTHONUNBUFFERED: '1',
-          VIRTUAL_ENV: fs.existsSync(venvPython) ? path.join(resolvedPdfServicePath, 'venv') : undefined
-        }
+        env: pythonEnv
       })
 
       let stdout = ''
