@@ -1,25 +1,28 @@
 services:
   - type: web
     name: ikap-backend
-    # Для использования Docker:
-    # 1. В панели Render.com выберите сервис
-    # 2. Settings -> Environment -> выберите "Docker"
-    # 3. Укажите Dockerfile Path: ./Dockerfile
-    # 
-    # Если Docker недоступен, используйте buildCommand ниже:
-    env: node
+    # Вариант 1: Использование образа из Docker Hub (рекомендуется)
+    # Замените YOUR_DOCKERHUB_USERNAME на ваш username в Docker Hub
+    # dockerImage: YOUR_DOCKERHUB_USERNAME/ikap2-backend:latest
+    #
+    # Вариант 2: Сборка из Dockerfile (если dockerImage не указан)
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    #
+    # Вариант 3: Node.js без Docker (если Docker недоступен)
+    # env: node
+    # buildCommand: |
+    #   npm install &&
+    #   npm run build &&
+    #   python3 --version &&
+    #   cd pdf &&
+    #   python3 -m pip install --user --upgrade pip setuptools wheel &&
+    #   python3 -m pip install --user -r requirements.txt &&
+    #   python3 -c "import site; print('User site-packages:', site.getusersitepackages())" &&
+    #   echo "Python dependencies installed successfully (--user)"
+    # startCommand: npm start
     region: oregon
     plan: starter
-    buildCommand: |
-      npm install &&
-      npm run build &&
-      python3 --version &&
-      cd pdf &&
-      python3 -m pip install --user --upgrade pip setuptools wheel &&
-      python3 -m pip install --user -r requirements.txt &&
-      python3 -c "import site; print('User site-packages:', site.getusersitepackages())" &&
-      echo "Python dependencies installed successfully (--user)"
-    startCommand: npm start
     envVars:
       # Обязательные переменные (нужно установить вручную в панели Render)
       - key: OPENAI_API_KEY
