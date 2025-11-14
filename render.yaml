@@ -2,12 +2,11 @@ services:
   - type: web
     name: ikap-backend
     # Вариант 1: Использование образа из Docker Hub (рекомендуется)
-    # Замените YOUR_DOCKERHUB_USERNAME на ваш username в Docker Hub
-    # dockerImage: YOUR_DOCKERHUB_USERNAME/ikap2-backend:latest
+    dockerImage: mshaim001/ikap2-backend:latest
     #
     # Вариант 2: Сборка из Dockerfile (если dockerImage не указан)
-    dockerfilePath: ./Dockerfile
-    dockerContext: .
+    # dockerfilePath: ./Dockerfile
+    # dockerContext: .
     #
     # Вариант 3: Node.js без Docker (если Docker недоступен)
     # env: node
@@ -39,7 +38,7 @@ services:
       # Настройки PDF-сервиса
       # В Docker путь будет /app/pdf, без Docker - /opt/render/project/src/pdf
       - key: PDF_SERVICE_PATH
-        value: /opt/render/project/src/pdf
+        value: /app/pdf
       - key: PYTHON_PATH
         value: python3
       
