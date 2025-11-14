@@ -1,0 +1,233 @@
+/**
+ * Модуль для конвертации PDF выписок в JSON через Python-сервис
+ * Использует алгоритм из /Users/mshaimard/pdf
+ */
+
+const { spawn } = require('child_process')
+const path = require('path')
+const fs = require('fs')
+const { promisify } = require('util')
+
+const writeFile = promisify(fs.writeFile)
+const unlink = promisify(fs.unlink)
+const mkdir = promisify(fs.mkdir)
+
+// Путь к Python-сервису конвертации
+// По умолчанию используем относительный путь для production (render.com)
+// или абсолютный путь для локальной разработки
+const PDF_SERVICE_PATH = process.env.PDF_SERVICE_PATH || 
+  (process.env.NODE_ENV === 'production' ? './pdf' : '/Users/mshaimard/pdf')
+const PDF_SERVICE_PORT = process.env.PDF_SERVICE_PORT || 8000
+const PDF_SERVICE_URL = process.env.PDF_SERVICE_URL || `http://localhost:${PDF_SERVICE_PORT}`
+
+/**
+ * Конвертирует PDF файл в JSON через Python-сервис
+ * @param {Buffer} pdfBuffer - Байты PDF файла
+ * @param {string} filename - Имя файла
+ * @returns {Promise<Array>} Массив с результатами конвертации
+ */
+async function convertPdfToJson(pdfBuffer, filename) {
+  // Вариант 1: Вызов через HTTP (если сервис запущен)
+  if (process.env.USE_PDF_SERVICE_HTTP === 'true' || process.env.USE_PDF_SERVICE_HTTP === '1') {
+    return convertPdfToJsonViaHttp(pdfBuffer, filename)
+  }
+  
+  // Вариант 2: Прямой вызов Python скрипта
+  return convertPdfToJsonViaPython(pdfBuffer, filename)
+}
+
+/**
+ * Конвертация через HTTP запрос к Python-сервису
+ */
+async function convertPdfToJsonViaHttp(pdfBuffer, filename) {
+  const FormData = require('form-data')
+  const axios = require('axios')
+  
+  const formData = new FormData()
+  formData.append('files', pdfBuffer, {
+    filename: filename,
+    contentType: 'application/pdf'
+  })
+
+  try {
+    const response = await axios.post(`${PDF_SERVICE_URL}/process`, formData, {
+      headers: formData.getHeaders(),
+      timeout: 300000, // 5 минут таймаут для больших файлов
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity
+    })
+
+    if (response.status === 204) {
+      // Нет строк с кредитом
+      return []
+    }
+
+    return Array.isArray(response.data) ? response.data : [response.data]
+  } catch (error) {
+    console.error('❌ Ошибка HTTP запроса к PDF-сервису:', error.message)
+    if (error.response) {
+      console.error('Response status:', error.response.status)
+      console.error('Response data:', error.response.data)
+    }
+    throw new Error(`Не удалось конвертировать PDF через HTTP: ${error.message}`)
+  }
+}
+
+/**
+ * Конвертация через прямой вызов Python скрипта
+ */
+async function convertPdfToJsonViaPython(pdfBuffer, filename) {
+  const tempDir = path.join(__dirname, 'temp')
+  const tempPdfPath = path.join(tempDir, `pdf_${Date.now()}_${filename}`)
+  
+  try {
+    // Создаем временную директорию, если её нет
+    if (!fs.existsSync(tempDir)) {
+      await mkdir(tempDir, { recursive: true })
+    }
+
+    // Сохраняем PDF во временный файл
+    await writeFile(tempPdfPath, pdfBuffer)
+    console.log(`📄 PDF сохранен во временный файл: ${tempPdfPath}`)
+
+    // Вызываем Python скрипт для конвертации
+    // Используем path.resolve для правильной обработки относительных путей
+    const resolvedPdfServicePath = path.isAbsolute(PDF_SERVICE_PATH) 
+      ? PDF_SERVICE_PATH 
+      : path.resolve(__dirname, PDF_SERVICE_PATH)
+    const pythonScript = path.join(resolvedPdfServicePath, 'app', 'cli.py')
+    const pythonExecutable = process.env.PYTHON_PATH || 'python3'
+
+    return new Promise((resolve, reject) => {
+      const pythonProcess = spawn(pythonExecutable, [pythonScript, tempPdfPath, '--json'], {
+        cwd: resolvedPdfServicePath,
+        env: {
+          ...process.env,
+          PYTHONUNBUFFERED: '1'
+        }
+      })
+
+      let stdout = ''
+      let stderr = ''
+
+      pythonProcess.stdout.on('data', (data) => {
+        stdout += data.toString()
+      })
+
+      pythonProcess.stderr.on('data', (data) => {
+        stderr += data.toString()
+      })
+
+      pythonProcess.on('close', async (code) => {
+        // Удаляем временный файл
+        try {
+          await unlink(tempPdfPath)
+        } catch (err) {
+          console.warn('⚠️ Не удалось удалить временный файл:', err.message)
+        }
+
+        if (code !== 0) {
+          console.error('❌ Python скрипт завершился с ошибкой:', stderr)
+          reject(new Error(`Python скрипт завершился с кодом ${code}: ${stderr}`))
+          return
+        }
+
+        try {
+          // Проверяем, есть ли сообщение об отсутствии транзакций
+          const stdoutTrimmed = stdout.trim()
+          if (stdoutTrimmed === '' || stdoutTrimmed.includes('No credit rows found')) {
+            console.log('⚠️ В PDF файле не найдено операций по кредиту')
+            // Возвращаем пустой результат
+            resolve([{
+              source_file: filename,
+              metadata: {},
+              transactions: [],
+              error: 'Не найдено операций по кредиту в PDF файле'
+            }])
+            return
+          }
+
+          // Парсим JSON из stdout
+          const result = JSON.parse(stdoutTrimmed)
+          console.log(`✅ PDF конвертирован в JSON: найдено ${Array.isArray(result) ? result.length : 1} файл(ов)`)
+          resolve(Array.isArray(result) ? result : [result])
+        } catch (parseError) {
+          console.error('❌ Ошибка парсинга JSON:', parseError.message)
+          console.error('Stdout:', stdout)
+          // Если это не JSON, но код успешный - возможно, нет транзакций
+          if (code === 0 && stdout.trim().includes('No credit rows found')) {
+            resolve([{
+              source_file: filename,
+              metadata: {},
+              transactions: [],
+              error: 'Не найдено операций по кредиту в PDF файле'
+            }])
+          } else {
+            reject(new Error(`Не удалось распарсить JSON ответ: ${parseError.message}`))
+          }
+        }
+      })
+
+      pythonProcess.on('error', async (error) => {
+        // Удаляем временный файл при ошибке
+        try {
+          await unlink(tempPdfPath)
+        } catch (err) {
+          // Игнорируем ошибку удаления
+        }
+        console.error('❌ Ошибка запуска Python процесса:', error.message)
+        reject(new Error(`Не удалось запустить Python скрипт: ${error.message}`))
+      })
+    })
+  } catch (error) {
+    // Удаляем временный файл при ошибке
+    try {
+      if (fs.existsSync(tempPdfPath)) {
+        await unlink(tempPdfPath)
+      }
+    } catch (err) {
+      // Игнорируем ошибку удаления
+    }
+    throw error
+  }
+}
+
+/**
+ * Конвертирует массив PDF файлов в JSON
+ * @param {Array<{buffer: Buffer, filename: string}>} files - Массив файлов
+ * @returns {Promise<Array>} Массив результатов конвертации
+ */
+async function convertPdfsToJson(files) {
+  const results = []
+  
+  for (const file of files) {
+    try {
+      console.log(`🔄 Конвертирую PDF: ${file.filename}`)
+      const result = await convertPdfToJson(file.buffer, file.filename)
+      
+      // Результат может быть массивом (если несколько файлов) или объектом
+      if (Array.isArray(result)) {
+        results.push(...result)
+      } else {
+        results.push(result)
+      }
+    } catch (error) {
+      console.error(`❌ Ошибка конвертации файла ${file.filename}:`, error.message)
+      // Добавляем ошибку в результат, чтобы пользователь видел, что произошло
+      results.push({
+        source_file: file.filename,
+        metadata: {},
+        transactions: [],
+        error: error.message
+      })
+    }
+  }
+  
+  return results
+}
+
+module.exports = {
+  convertPdfToJson,
+  convertPdfsToJson
+}
+

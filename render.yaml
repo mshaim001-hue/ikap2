@@ -1,0 +1,40 @@
+services:
+  - type: web
+    name: ikap-backend
+    env: node
+    region: oregon
+    plan: starter
+    buildCommand: |
+      npm install &&
+      npm run build &&
+      cd pdf && pip3 install -r requirements.txt || echo "Python dependencies installation failed, but continuing..."
+    startCommand: npm start
+    envVars:
+      # Обязательные переменные (нужно установить вручную в панели Render)
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      
+      # Adobe PDF Services API (обязательно для конвертации PDF)
+      - key: ADOBE_CLIENT_ID
+        sync: false
+      - key: ADOBE_CLIENT_SECRET
+        sync: false
+      
+      # Настройки PDF-сервиса
+      - key: PDF_SERVICE_PATH
+        value: ./pdf
+      - key: PYTHON_PATH
+        value: python3
+      
+      # Опциональные настройки
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        generateValue: true
+      - key: OPENAI_TIMEOUT_MS
+        value: "1200000"
+      - key: OPENAI_MAX_RETRIES
+        value: "2"
+
