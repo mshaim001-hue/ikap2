@@ -799,37 +799,19 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
           console.warn(`⚠️ Создан JSON файл без транзакций: ${jsonFilename} (возможно, в PDF нет операций по кредиту)`)
         }
 
-        // Загружаем JSON файл в OpenAI (даже если транзакций нет - агент должен об этом знать)
-        const jsonFile = await openaiClient.files.create({
-          file: await toFile(jsonBuffer, jsonFilename, { type: 'application/json' }),
-          purpose: 'assistants',
-        })
-
-        console.log('✅ JSON файл загружен в OpenAI', {
-          fileId: jsonFile.id,
-          filename: jsonFile.filename,
-          purpose: jsonFile.purpose,
-        })
-
-        const category = 'statements'
-        try {
-          await saveFileToDB(
-            sessionId,
-            jsonFile.id,
-            jsonFilename,
-            jsonBuffer.length,
-            'application/json',
-            category
-          )
-        } catch (error) {
-          console.error('⚠️ Не удалось сохранить JSON файл в БД, продолжаем работу', error)
-        }
-
+        // ВАЖНО: OpenAI Code Interpreter не поддерживает JSON файлы напрямую
+        // Включаем JSON данные в промпт вместо загрузки файла
+        // Это более надежный способ передачи данных агенту
+        
+        // Сохраняем JSON данные для включения в промпт
+        const jsonDataString = JSON.stringify(jsonData, null, 2)
+        
+        // Сохраняем информацию о конвертированных данных для использования в промпте
         attachments.push({
-          file_id: jsonFile.id,
-          original_filename: jsonFilename,
           is_converted: true,
-          source_files: pdfFiles.map(f => f.originalname)
+          source_files: pdfFiles.map(f => f.originalname),
+          json_data: jsonDataString,
+          transaction_count: allTransactions.length
         })
       } catch (conversionError) {
         console.error('❌ Ошибка конвертации PDF в JSON:', conversionError.message)
@@ -900,56 +882,56 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
     const metadataPrompt = buildPromptFromMetadata(metadata)
     
     // Формируем промпт с учетом того, что PDF уже конвертированы в JSON
-    let dataDescription = ''
-    if (pdfFiles.length > 0) {
-      const jsonAttachments = attachments.filter(a => a.is_converted)
-      if (jsonAttachments.length > 0) {
-        dataDescription = `\n\nВАЖНО: Ты получаешь JSON файл(ы) с уже очищенными данными из ${pdfFiles.length} банковских выписк(и). Все операции уже отфильтрованы - остались только операции по КРЕДИТУ (поступления на счет). Твоя задача - проанализировать каждую операцию по полю "Назначение платежа" и определить, является ли она выручкой от реализации товаров и услуг.`
-      }
+    let jsonDataInPrompt = ''
+    const jsonAttachments = attachments.filter(a => a.is_converted && a.json_data)
+    
+    if (jsonAttachments.length > 0) {
+      // Включаем JSON данные прямо в промпт, так как Code Interpreter не поддерживает JSON файлы
+      const allJsonData = jsonAttachments.map(att => att.json_data).join('\n\n--- Следующий файл ---\n\n')
+      jsonDataInPrompt = `\n\n📊 **ДАННЫЕ ИЗ БАНКОВСКИХ ВЫПИСОК (JSON):**\n\nВсе операции уже отфильтрованы - остались только операции по КРЕДИТУ (поступления на счет). Проанализируй каждую операцию по полю "Назначение платежа" и определи, является ли она выручкой от реализации товаров и услуг.\n\n\`\`\`json\n${allJsonData}\n\`\`\``
     }
     
-    const combinedPrompt = [defaultUserPrompt, dataDescription, metadataPrompt, comment]
+    const combinedPrompt = [defaultUserPrompt, jsonDataInPrompt, metadataPrompt, comment]
       .filter(Boolean)
       .join('\n\n')
 
-    const fileIds = attachments.map((attachment) => attachment.file_id)
+    // Фильтруем только реальные файлы (не конвертированные JSON, которые уже в промпте)
+    const realFileAttachments = attachments.filter(a => !a.is_converted || !a.json_data)
+    const fileIds = realFileAttachments.map((attachment) => attachment.file_id).filter(Boolean)
     const analystAgent = createFinancialAnalystAgent(fileIds)
 
-    const agentInput = attachments.length
-      ? attachments.map((attachment, index) => {
-          let fileDescription = ''
-          if (attachment.is_converted) {
-            fileDescription = `\n\nЭто JSON файл с конвертированными данными из PDF выписок: ${(attachment.source_files || []).join(', ')}. Файл содержит только операции по кредиту (поступления).`
-          }
-          
-          return {
-            role: 'user',
-            content: [
-              {
-                type: 'input_text',
-                text:
-                  index === 0
-                    ? `${combinedPrompt}${fileDescription}\n\nФайл для анализа: ${attachment.original_filename || attachment.file_id}`
-                    : `Дополнительный файл ${index + 1}: ${attachment.original_filename || attachment.file_id}${fileDescription}`,
-              },
-              {
-                type: 'input_file',
-                file: { id: attachment.file_id },
-              },
-            ],
-          }
+    // Формируем входные данные для агента
+    const agentInput = []
+    
+    // Основной промпт с JSON данными
+    agentInput.push({
+      role: 'user',
+      content: [
+        {
+          type: 'input_text',
+          text: combinedPrompt,
+        },
+      ],
+    })
+    
+    // Добавляем реальные файлы (не PDF, которые уже конвертированы)
+    for (const attachment of realFileAttachments) {
+      if (attachment.file_id) {
+        agentInput.push({
+          role: 'user',
+          content: [
+            {
+              type: 'input_text',
+              text: `Дополнительный файл: ${attachment.original_filename || attachment.file_id}`,
+            },
+            {
+              type: 'input_file',
+              file: { id: attachment.file_id },
+            },
+          ],
         })
-      : [
-          {
-            role: 'user',
-            content: [
-              {
-                type: 'input_text',
-                text: combinedPrompt,
-              },
-            ],
-          },
-        ]
+      }
+    }
 
     console.log('🤖 Запускаем финансового аналитика через Runner (async)', {
       fileIds: fileIds.length,

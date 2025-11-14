@@ -23,8 +23,9 @@ services:
         sync: false
       
       # Настройки PDF-сервиса
+      # На Render.com путь будет автоматически определен как /opt/render/project/src/pdf
       - key: PDF_SERVICE_PATH
-        value: ./pdf
+        value: /opt/render/project/src/pdf
       - key: PYTHON_PATH
         value: python3
       

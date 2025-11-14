@@ -13,10 +13,12 @@ const unlink = promisify(fs.unlink)
 const mkdir = promisify(fs.mkdir)
 
 // Путь к Python-сервису конвертации
-// По умолчанию используем относительный путь для production (render.com)
-// или абсолютный путь для локальной разработки
+// На Render.com путь будет /opt/render/project/src/pdf
+// Локально: /Users/mshaimard/pdf или ./pdf
 const PDF_SERVICE_PATH = process.env.PDF_SERVICE_PATH || 
-  (process.env.NODE_ENV === 'production' ? './pdf' : '/Users/mshaimard/pdf')
+  (process.env.NODE_ENV === 'production' 
+    ? (process.env.RENDER ? '/opt/render/project/src/pdf' : './pdf')
+    : '/Users/mshaimard/pdf')
 const PDF_SERVICE_PORT = process.env.PDF_SERVICE_PORT || 8000
 const PDF_SERVICE_URL = process.env.PDF_SERVICE_URL || `http://localhost:${PDF_SERVICE_PORT}`
 
@@ -76,7 +78,7 @@ async function convertPdfToJsonViaHttp(pdfBuffer, filename) {
 /**
  * Конвертация через прямой вызов Python скрипта
  */
-async function convertPdfToJsonViaPython(pdfBuffer, filename) {
+async function convertPdfToJsonViaPython(pdfBuffer, filename, customPdfServicePath = null) {
   const tempDir = path.join(__dirname, 'temp')
   const tempPdfPath = path.join(tempDir, `pdf_${Date.now()}_${filename}`)
   
@@ -92,11 +94,41 @@ async function convertPdfToJsonViaPython(pdfBuffer, filename) {
 
     // Вызываем Python скрипт для конвертации
     // Используем path.resolve для правильной обработки относительных путей
-    const resolvedPdfServicePath = path.isAbsolute(PDF_SERVICE_PATH) 
-      ? PDF_SERVICE_PATH 
-      : path.resolve(__dirname, PDF_SERVICE_PATH)
+    const servicePath = customPdfServicePath || PDF_SERVICE_PATH
+    const resolvedPdfServicePath = path.isAbsolute(servicePath) 
+      ? servicePath 
+      : path.resolve(__dirname, servicePath)
     const pythonScript = path.join(resolvedPdfServicePath, 'app', 'cli.py')
     const pythonExecutable = process.env.PYTHON_PATH || 'python3'
+    
+    // Проверяем существование файла
+    if (!fs.existsSync(pythonScript)) {
+      console.error(`❌ Python скрипт не найден: ${pythonScript}`)
+      console.error(`   PDF_SERVICE_PATH: ${PDF_SERVICE_PATH}`)
+      console.error(`   resolvedPdfServicePath: ${resolvedPdfServicePath}`)
+      console.error(`   __dirname: ${__dirname}`)
+      console.error(`   NODE_ENV: ${process.env.NODE_ENV}`)
+      console.error(`   RENDER: ${process.env.RENDER}`)
+      
+      // Пробуем альтернативные пути
+      const alternativePaths = [
+        path.join(__dirname, 'pdf', 'app', 'cli.py'),
+        path.join(process.cwd(), 'pdf', 'app', 'cli.py'),
+        '/opt/render/project/src/pdf/app/cli.py',
+        './pdf/app/cli.py'
+      ]
+      
+      for (const altPath of alternativePaths) {
+        if (fs.existsSync(altPath)) {
+          console.log(`✅ Найден альтернативный путь: ${altPath}`)
+          // Используем найденный путь
+          const altResolvedPath = path.dirname(path.dirname(altPath))
+          return convertPdfToJsonViaPython(pdfBuffer, filename, altResolvedPath)
+        }
+      }
+      
+      throw new Error(`Python скрипт не найден: ${pythonScript}. Проверьте, что папка pdf загружена в репозиторий.`)
+    }
 
     return new Promise((resolve, reject) => {
       const pythonProcess = spawn(pythonExecutable, [pythonScript, tempPdfPath, '--json'], {
