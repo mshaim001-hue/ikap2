@@ -1,12 +1,12 @@
 services:
   - type: web
     name: ikap-backend
-    # Вариант 1: Использование образа из Docker Hub (рекомендуется)
-    dockerImage: mshaim001/ikap2-backend:latest
+    # Вариант 1: Использование образа из Docker Hub
+    # dockerImage: mshaim001/ikap2-backend:latest
     #
-    # Вариант 2: Сборка из Dockerfile (если dockerImage не указан)
-    # dockerfilePath: ./Dockerfile
-    # dockerContext: .
+    # Вариант 2: Сборка из Dockerfile (активный - заставит Render.com использовать Docker)
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
     #
     # Вариант 3: Node.js без Docker (если Docker недоступен)
     # env: node
