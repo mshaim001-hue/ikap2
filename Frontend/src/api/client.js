@@ -16,7 +16,7 @@ const normalizePath = (path) => {
   if (path.startsWith('http')) {
     return path
   }
-  const base = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
+  const base = (import.meta.env.VITE_API_BASE_URL || 'https://ikap2-backend-latest.onrender.com').replace(/\/$/, '')
   const target = path.startsWith('/') ? path : `/${path}`
   return `${base}${target}`
 }

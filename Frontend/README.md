@@ -22,12 +22,16 @@ npm run dev
 
 | Переменная | Назначение | Пример |
 | --- | --- | --- |
-| `VITE_API_BASE_URL` | Базовый URL backend-сервиса (Render, локальный сервер и т. д.) | `https://ikap-backend.onrender.com` |
+| `VITE_API_BASE_URL` | Базовый URL backend-сервиса (Render, локальный сервер и т. д.) | `https://ikap2-backend-latest.onrender.com` (по умолчанию) |
 | `VITE_ANALYSIS_ENDPOINT` | (Опционально) кастомный путь для запуска анализа | `/api/analysis` |
 | `VITE_REPORTS_ENDPOINT` | (Опционально) путь для получения истории и деталей отчётов | `/api/reports` |
 | `VITE_APP_BASE_PATH` | Базовый путь для деплоя на GitHub Pages; укажите `/<repository-name>` | `/ikap-frontend` |
 
-Если дополнительные переменные не заданы, используются значения по умолчанию (`/api/analysis`, `/api/reports`, `/`).
+Если дополнительные переменные не заданы, используются значения по умолчанию:
+- `VITE_API_BASE_URL`: `https://ikap2-backend-latest.onrender.com`
+- `VITE_ANALYSIS_ENDPOINT`: `/api/analysis`
+- `VITE_REPORTS_ENDPOINT`: `/api/reports`
+- `VITE_APP_BASE_PATH`: `/`
 
 ## Скрипты npm
 
