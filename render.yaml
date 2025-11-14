@@ -1,10 +1,24 @@
 services:
   - type: web
     name: ikap-backend
-    dockerfilePath: ./Dockerfile
-    dockerContext: .
+    # Для использования Docker:
+    # 1. В панели Render.com выберите сервис
+    # 2. Settings -> Environment -> выберите "Docker"
+    # 3. Укажите Dockerfile Path: ./Dockerfile
+    # 
+    # Если Docker недоступен, используйте buildCommand ниже:
+    env: node
     region: oregon
     plan: starter
+    buildCommand: |
+      npm install &&
+      npm run build &&
+      python3 --version &&
+      cd pdf &&
+      sudo python3 -m pip install --upgrade pip setuptools wheel &&
+      sudo python3 -m pip install -r requirements.txt &&
+      echo "Python dependencies installed successfully (global)"
+    startCommand: npm start
     envVars:
       # Обязательные переменные (нужно установить вручную в панели Render)
       - key: OPENAI_API_KEY
@@ -19,9 +33,9 @@ services:
         sync: false
       
       # Настройки PDF-сервиса
-      # В Docker путь будет /app/pdf
+      # В Docker путь будет /app/pdf, без Docker - /opt/render/project/src/pdf
       - key: PDF_SERVICE_PATH
-        value: /app/pdf
+        value: /opt/render/project/src/pdf
       - key: PYTHON_PATH
         value: python3
       
