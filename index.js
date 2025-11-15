@@ -27,6 +27,20 @@ const app = express()
 
 app.set('etag', false)
 
+// Health check endpoints должны быть самыми первыми, чтобы отвечать сразу
+// Это критично для Render.com и других платформ
+app.get('/health', (req, res) => {
+  res.status(200).json({ 
+    status: 'ok', 
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime()
+  })
+})
+
+app.get('/ping', (req, res) => {
+  res.status(200).send('pong')
+})
+
 const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS || 1200000)
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY
 
@@ -86,19 +100,6 @@ app.use((req, res, next) => {
   next()
 })
 
-// Health check endpoint для Render.com и других платформ
-app.get('/health', (req, res) => {
-  res.status(200).json({ 
-    status: 'ok', 
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime()
-  })
-})
-
-// Простой ping endpoint
-app.get('/ping', (req, res) => {
-  res.status(200).send('pong')
-})
 
 const frontendDistPath = path.join(__dirname, 'Frontend', 'dist')
 
@@ -1336,12 +1337,14 @@ if (process.env.NODE_ENV === 'production') {
 
 const port = process.env.PORT || 3001
 
-// Запускаем сервер сразу, не дожидаясь инициализации БД
-// Это важно для Render.com, чтобы health check работал быстро
+// Запускаем сервер СРАЗУ, до всех тяжелых операций
+// Это критично для Render.com - health check должен отвечать быстро
+console.log(`⏳ Запуск сервера на порту ${port}...`)
 const server = app.listen(port, '0.0.0.0', () => {
-  console.log(`🚀 Backend iKapitalist запущен на порту ${port}`)
-  console.log(`📡 Health check доступен на http://0.0.0.0:${port}/health`)
-  console.log(`🏥 Ping endpoint доступен на http://0.0.0.0:${port}/ping`)
+  console.log(`✅ HTTP сервер запущен и слушает на порту ${port}`)
+  console.log(`📡 Health check: http://0.0.0.0:${port}/health`)
+  console.log(`🏥 Ping: http://0.0.0.0:${port}/ping`)
+  console.log(`🚀 Backend iKapitalist готов принимать запросы`)
 })
 
 // Обработка graceful shutdown для Render.com и других платформ
