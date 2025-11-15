@@ -41,6 +41,9 @@ const allowedOrigins = [
   process.env.FRONTEND_URL
 ].filter(Boolean)
 
+// Логируем разрешенные источники при старте
+console.log('🌐 Разрешенные CORS источники:', allowedOrigins)
+
 app.use(cors({
   origin: function (origin, callback) {
     // Разрешаем запросы без origin (например, Postman, curl)
