@@ -142,8 +142,12 @@ async function convertPdfToJsonViaPython(pdfBuffer, filename, customPdfServicePa
       // Функция для запуска Python процесса конвертации
       const runPythonConversion = () => {
         console.log(`🐍 Используем Python: ${actualPythonExecutable}`)
+        console.log(`📁 Рабочая директория: ${resolvedPdfServicePath}`)
         
-        const pythonProcess = spawn(actualPythonExecutable, [pythonScript, tempPdfPath, '--json'], {
+        // Запускаем как модуль, чтобы относительные импорты работали
+        // Используем: python3 -m app.cli file.pdf --json
+        // вместо: python3 app/cli.py file.pdf --json
+        const pythonProcess = spawn(actualPythonExecutable, ['-m', 'app.cli', tempPdfPath, '--json'], {
           cwd: resolvedPdfServicePath,
           env: pythonEnv
         })
