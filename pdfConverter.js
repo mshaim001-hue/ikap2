@@ -192,8 +192,24 @@ async function convertPdfToJsonViaPython(pdfBuffer, filename, customPdfServicePa
               return
             }
 
-            // Парсим JSON из stdout
-            const result = JSON.parse(stdoutTrimmed)
+            // Python скрипт может выводить логи в stdout перед JSON
+            // Ищем JSON блок в stdout (обычно это последний блок, начинающийся с [ или {)
+            let jsonString = stdoutTrimmed
+            
+            // Пытаемся найти JSON блок - ищем последний блок, начинающийся с [ или {
+            const jsonStartIndex = Math.max(
+              stdoutTrimmed.lastIndexOf('['),
+              stdoutTrimmed.lastIndexOf('{')
+            )
+            
+            if (jsonStartIndex > 0) {
+              // Найден JSON блок, извлекаем его
+              jsonString = stdoutTrimmed.substring(jsonStartIndex)
+              console.log(`📝 Извлечен JSON из stdout (пропущено ${jsonStartIndex} символов логов)`)
+            }
+
+            // Парсим JSON
+            const result = JSON.parse(jsonString)
             console.log(`✅ PDF конвертирован в JSON: найдено ${Array.isArray(result) ? result.length : 1} файл(ов)`)
             resolve(Array.isArray(result) ? result : [result])
           } catch (parseError) {
