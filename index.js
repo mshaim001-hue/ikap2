@@ -1322,7 +1322,56 @@ if (process.env.NODE_ENV === 'production') {
 
 const port = process.env.PORT || 3001
 
-app.listen(port, () => {
+const server = app.listen(port, () => {
   console.log(`🚀 Backend iKapitalist запущен на порту ${port}`)
+})
+
+// Обработка graceful shutdown для Render.com и других платформ
+const gracefulShutdown = (signal) => {
+  console.log(`\n📛 Получен сигнал ${signal}, начинаем graceful shutdown...`)
+  
+  server.close((err) => {
+    if (err) {
+      console.error('❌ Ошибка при закрытии сервера:', err)
+      process.exit(1)
+    }
+    
+    console.log('✅ HTTP сервер закрыт')
+    
+    // Закрываем соединение с БД, если есть метод close
+    if (db && typeof db.close === 'function') {
+      try {
+        db.close()
+        console.log('✅ Соединение с БД закрыто')
+      } catch (dbError) {
+        console.error('⚠️ Ошибка при закрытии БД:', dbError)
+      }
+    }
+    
+    console.log('✅ Graceful shutdown завершен')
+    process.exit(0)
+  })
+  
+  // Таймаут для принудительного завершения
+  setTimeout(() => {
+    console.error('⚠️ Принудительное завершение после таймаута')
+    process.exit(1)
+  }, 10000) // 10 секунд
+}
+
+// Обработка сигналов завершения
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'))
+process.on('SIGINT', () => gracefulShutdown('SIGINT'))
+
+// Обработка необработанных ошибок
+process.on('uncaughtException', (error) => {
+  console.error('❌ Необработанное исключение:', error)
+  gracefulShutdown('uncaughtException')
+})
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('❌ Необработанный rejection:', reason)
+  console.error('Promise:', promise)
+  // Не завершаем процесс для unhandledRejection, только логируем
 })
 
