@@ -78,13 +78,25 @@ class AdobePDFService:
         self._connect_timeout = connect_timeout or int(os.getenv("ADOBE_CONNECT_TIMEOUT", "4000"))
         self._read_timeout = read_timeout or int(os.getenv("ADOBE_READ_TIMEOUT", "10000"))
 
+        import sys
+        print(f"[ADOBE_SERVICE] Проверка credentials...", file=sys.stderr, flush=True)
+        print(f"[ADOBE_SERVICE] credentials_file: {self._credentials_file or 'не установлен'}", file=sys.stderr, flush=True)
+        print(f"[ADOBE_SERVICE] client_id: {'✅ установлен' if self._client_id else '❌ не установлен'}", file=sys.stderr, flush=True)
+        print(f"[ADOBE_SERVICE] client_secret: {'✅ установлен' if self._client_secret else '❌ не установлен'}", file=sys.stderr, flush=True)
+        print(f"[ADOBE_SERVICE] region: {self._region}", file=sys.stderr, flush=True)
+        print(f"[ADOBE_SERVICE] connect_timeout: {self._connect_timeout}ms", file=sys.stderr, flush=True)
+        print(f"[ADOBE_SERVICE] read_timeout: {self._read_timeout}ms", file=sys.stderr, flush=True)
+        
         if not self._credentials_file and (not self._client_id or not self._client_secret):
-            raise ValueError(
+            error_msg = (
                 "Необходимо указать либо credentials_file, либо client_id и client_secret. "
                 "Можно также использовать переменные окружения: "
                 "ADOBE_CREDENTIALS_FILE или ADOBE_CLIENT_ID/ADOBE_CLIENT_SECRET"
             )
-
+            print(f"[ADOBE_SERVICE] ❌ {error_msg}", file=sys.stderr, flush=True)
+            raise ValueError(error_msg)
+        
+        print(f"[ADOBE_SERVICE] ✅ Credentials проверены успешно", file=sys.stderr, flush=True)
         self._execution_context: Optional[ExecutionContext] = None
 
     def _get_execution_context(self) -> ExecutionContext:
@@ -134,19 +146,30 @@ class AdobePDFService:
 
     def _get_access_token(self) -> str:
         """Получить access token для REST API."""
+        import sys
         token_url = "https://pdf-services.adobe.io/token"
+        print(f"[ADOBE_SERVICE] Запрос access token с {token_url}...", file=sys.stderr, flush=True)
         
-        response = requests.post(
-            token_url,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            data={
-                "client_id": self._client_id,
-                "client_secret": self._client_secret
-            },
-            timeout=10
-        )
-        response.raise_for_status()
-        return response.json()["access_token"]
+        try:
+            response = requests.post(
+                token_url,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                data={
+                    "client_id": self._client_id,
+                    "client_secret": self._client_secret
+                },
+                timeout=10
+            )
+            print(f"[ADOBE_SERVICE] Ответ на запрос token: статус {response.status_code}", file=sys.stderr, flush=True)
+            response.raise_for_status()
+            token_data = response.json()
+            print(f"[ADOBE_SERVICE] ✅ Access token получен успешно", file=sys.stderr, flush=True)
+            return token_data["access_token"]
+        except Exception as e:
+            print(f"[ADOBE_SERVICE] ❌ Ошибка получения access token: {e}", file=sys.stderr, flush=True)
+            if hasattr(e, 'response') and e.response is not None:
+                print(f"[ADOBE_SERVICE] Ответ сервера: {e.response.text[:500]}", file=sys.stderr, flush=True)
+            raise
 
     def _upload_asset(self, access_token: str, pdf_bytes: bytes, filename: Optional[str] = None) -> str:
         """
@@ -168,7 +191,8 @@ class AdobePDFService:
         }
         
         # Шаг 2.1: Получаем pre-signed URI для загрузки
-        print(f"[INFO] Получение pre-signed URI для загрузки PDF...", flush=True)
+        import sys
+        print(f"[INFO] Получение pre-signed URI для загрузки PDF...", file=sys.stderr, flush=True)
         response = requests.post(
             f"{base_url}/assets",
             headers=headers,
@@ -184,7 +208,7 @@ class AdobePDFService:
         if not upload_uri or not asset_id:
             raise Exception(f"Не удалось получить uploadUri или assetID: {asset_data}")
         
-        print(f"[INFO] Asset ID получен: {asset_id}. Загрузка файла...", flush=True)
+        print(f"[INFO] Asset ID получен: {asset_id}. Загрузка файла...", file=sys.stderr, flush=True)
         
         # Шаг 2.2: Загружаем файл на S3 используя pre-signed URI
         upload_response = requests.put(
@@ -195,7 +219,7 @@ class AdobePDFService:
         )
         upload_response.raise_for_status()
         
-        print(f"[INFO] Файл успешно загружен", flush=True)
+        print(f"[INFO] Файл успешно загружен", file=sys.stderr, flush=True)
         return asset_id
 
     def convert_pdf_to_excel(self, pdf_bytes: bytes, filename: Optional[str] = None) -> bytes:
@@ -223,9 +247,10 @@ class AdobePDFService:
             raise ValueError("Client ID и Client Secret обязательны для использования REST API")
 
         # Шаг 1: Получаем access token
-        print(f"[INFO] Получение access token...", flush=True)
+        import sys
+        print(f"[INFO] Получение access token...", file=sys.stderr, flush=True)
         access_token = self._get_access_token()
-        print(f"[INFO] Access token получен", flush=True)
+        print(f"[INFO] Access token получен", file=sys.stderr, flush=True)
         
         # Базовый URL для API
         if self._region.upper() == "EU":
@@ -243,7 +268,8 @@ class AdobePDFService:
         asset_id = self._upload_asset(access_token, pdf_bytes, filename)
         
         # Шаг 3: Создаем job для экспорта PDF в Excel
-        print(f"[INFO] Создание job для экспорта PDF в Excel...", flush=True)
+        import sys
+        print(f"[INFO] Создание job для экспорта PDF в Excel...", file=sys.stderr, flush=True)
         export_url = f"{base_url}/operation/exportpdf"
         
         # Формируем payload для экспорта в Excel
@@ -291,8 +317,9 @@ class AdobePDFService:
         last_error = None
         
         # Пробуем разные варианты payload
+        import sys
         for i, payload in enumerate(payload_variants, 1):
-            print(f"[DEBUG] Пробую вариант payload {i}: {payload}", flush=True)
+            print(f"[DEBUG] Пробую вариант payload {i}: {payload}", file=sys.stderr, flush=True)
             try:
                 response = requests.post(
                     export_url,
@@ -302,37 +329,38 @@ class AdobePDFService:
                 )
                 
                 if response.status_code in (200, 201):
-                    print(f"[INFO] ✅ Payload вариант {i} сработал!", flush=True)
+                    print(f"[INFO] ✅ Payload вариант {i} сработал!", file=sys.stderr, flush=True)
                     break
                 else:
                     error_text = response.text
-                    print(f"[DEBUG] Вариант {i} failed: {response.status_code} - {error_text[:300]}", flush=True)
+                    print(f"[DEBUG] Вариант {i} failed: {response.status_code} - {error_text[:300]}", file=sys.stderr, flush=True)
                     last_error = error_text
             except Exception as e:
-                print(f"[DEBUG] Вариант {i} exception: {e}", flush=True)
+                print(f"[DEBUG] Вариант {i} exception: {e}", file=sys.stderr, flush=True)
                 last_error = str(e)
         
         if not response or response.status_code not in (200, 201):
             error_text = last_error or (response.text if response else "No response")
-            print(f"[ERROR] Все варианты payload failed. Последняя ошибка: {response.status_code if response else 'No response'} - {error_text[:500]}", flush=True)
+            print(f"[ERROR] Все варианты payload failed. Последняя ошибка: {response.status_code if response else 'No response'} - {error_text[:500]}", file=sys.stderr, flush=True)
             if response:
                 response.raise_for_status()
             else:
                 raise Exception(f"Не удалось создать job. Ошибка: {last_error}")
         
         # Получаем location из заголовка или job ID из тела ответа
+        import sys
         location = response.headers.get("Location")
         job_id = None
         
-        print(f"[DEBUG] Response headers Location: {location}", flush=True)
-        print(f"[DEBUG] Response status: {response.status_code}", flush=True)
+        print(f"[DEBUG] Response headers Location: {location}", file=sys.stderr, flush=True)
+        print(f"[DEBUG] Response status: {response.status_code}", file=sys.stderr, flush=True)
         
         if location:
             # Извлекаем job ID из location URL
             # Location может быть: /operation/exportpdf/{job_id}/status
             # или просто {job_id}
             location_parts = location.strip("/").split("/")
-            print(f"[DEBUG] Location parts: {location_parts}", flush=True)
+            print(f"[DEBUG] Location parts: {location_parts}", file=sys.stderr, flush=True)
             
             # Ищем job_id в location (обычно перед /status)
             if "status" in location_parts:
@@ -343,16 +371,16 @@ class AdobePDFService:
                 # Если нет /status, берем последний элемент
                 job_id = location_parts[-1]
             
-            print(f"[DEBUG] Extracted job_id from Location: {job_id}", flush=True)
+            print(f"[DEBUG] Extracted job_id from Location: {job_id}", file=sys.stderr, flush=True)
         
         # Пробуем получить из тела ответа, если не получили из location
         if not job_id:
             try:
                 job_data = response.json()
-                print(f"[DEBUG] Response body: {job_data}", flush=True)
+                print(f"[DEBUG] Response body: {job_data}", file=sys.stderr, flush=True)
                 job_id = job_data.get("jobId") or job_data.get("id") or job_data.get("job_id")
             except Exception as e:
-                print(f"[DEBUG] Could not parse response body: {e}", flush=True)
+                print(f"[DEBUG] Could not parse response body: {e}", file=sys.stderr, flush=True)
                 pass
         
         if not job_id or job_id == "status":
@@ -362,19 +390,19 @@ class AdobePDFService:
                 match = re.search(r'/exportpdf/([^/]+)/status', location)
                 if match:
                     job_id = match.group(1)
-                    print(f"[DEBUG] Extracted job_id from regex: {job_id}", flush=True)
+                    print(f"[DEBUG] Extracted job_id from regex: {job_id}", file=sys.stderr, flush=True)
                 else:
                     # Пробуем другой паттерн
                     match = re.search(r'/([a-f0-9\-]+)/status', location)
                     if match:
                         job_id = match.group(1)
-                        print(f"[DEBUG] Extracted job_id from regex pattern 2: {job_id}", flush=True)
+                        print(f"[DEBUG] Extracted job_id from regex pattern 2: {job_id}", file=sys.stderr, flush=True)
         
         if not job_id or job_id == "status":
-            print(f"[ERROR] Полный ответ: Status={response.status_code}, Headers={dict(response.headers)}, Body={response.text[:500]}", flush=True)
+            print(f"[ERROR] Полный ответ: Status={response.status_code}, Headers={dict(response.headers)}, Body={response.text[:500]}", file=sys.stderr, flush=True)
             raise Exception(f"Не удалось получить правильный job ID из ответа. Location: {location}, Status: {response.status_code}, Response: {response.text[:200]}")
         
-        print(f"[INFO] Job создан: {job_id}. Ожидание завершения...", flush=True)
+        print(f"[INFO] Job создан: {job_id}. Ожидание завершения...", file=sys.stderr, flush=True)
         
         # Шаг 4: Проверяем статус job
         status_url = f"{export_url}/{job_id}/status"
@@ -382,7 +410,8 @@ class AdobePDFService:
         # Можно настроить через переменную окружения ADOBE_JOB_TIMEOUT (в секундах)
         max_wait = int(os.getenv("ADOBE_JOB_TIMEOUT", "600"))  # 10 минут по умолчанию
         start_time = time.time()
-        print(f"[DEBUG] Максимальное время ожидания: {max_wait} секунд ({max_wait // 60} минут)", flush=True)
+        import sys
+        print(f"[DEBUG] Максимальное время ожидания: {max_wait} секунд ({max_wait // 60} минут)", file=sys.stderr, flush=True)
         
         while time.time() - start_time < max_wait:
             status_response = requests.get(status_url, headers=headers, timeout=10)
@@ -390,11 +419,11 @@ class AdobePDFService:
             status_data = status_response.json()
             
             status = status_data.get("status", "unknown")
-            print(f"[INFO] Статус job: {status}", flush=True)
+            print(f"[INFO] Статус job: {status}", file=sys.stderr, flush=True)
             
             if status == "done" or status == "success":
                 # Шаг 5: Скачиваем результат
-                print(f"[DEBUG] Полный ответ статуса: {status_data}", flush=True)
+                print(f"[DEBUG] Полный ответ статуса: {status_data}", file=sys.stderr, flush=True)
                 
                 # Пробуем разные варианты ключей для downloadUri
                 # Сначала проверяем asset объект (это основной путь для Adobe API)
@@ -433,29 +462,32 @@ class AdobePDFService:
                 if not download_uri:
                     # Пробуем получить результат через другой endpoint
                     result_url = f"{export_url}/{job_id}/result"
-                    print(f"[DEBUG] Пробую получить результат через {result_url}", flush=True)
+                    import sys
+                    print(f"[DEBUG] Пробую получить результат через {result_url}", file=sys.stderr, flush=True)
                     try:
                         result_response = requests.get(result_url, headers=headers, timeout=10)
                         result_response.raise_for_status()
                         # Если это redirect, используем Location
                         if result_response.status_code in (301, 302, 303, 307, 308):
                             download_uri = result_response.headers.get("Location")
-                            print(f"[DEBUG] Redirect на: {download_uri}", flush=True)
+                            print(f"[DEBUG] Redirect на: {download_uri}", file=sys.stderr, flush=True)
                         elif result_response.headers.get("Content-Type", "").startswith("application/vnd.openxmlformats"):
                             # Прямой ответ с файлом
-                            print(f"[INFO] Результат получен напрямую, размер: {len(result_response.content)} байт", flush=True)
+                            print(f"[INFO] Результат получен напрямую, размер: {len(result_response.content)} байт", file=sys.stderr, flush=True)
                             return result_response.content
                     except Exception as e:
-                        print(f"[DEBUG] Не удалось получить результат через result endpoint: {e}", flush=True)
+                        print(f"[DEBUG] Не удалось получить результат через result endpoint: {e}", file=sys.stderr, flush=True)
                 
                 if download_uri:
-                    print(f"[INFO] Скачивание результата с URI: {download_uri}", flush=True)
+                    import sys
+                    print(f"[INFO] Скачивание результата с URI: {download_uri}", file=sys.stderr, flush=True)
                     result_response = requests.get(download_uri, timeout=60)
                     result_response.raise_for_status()
-                    print(f"[INFO] Результат получен, размер: {len(result_response.content)} байт", flush=True)
+                    print(f"[INFO] Результат получен, размер: {len(result_response.content)} байт", file=sys.stderr, flush=True)
                     return result_response.content
                 else:
-                    print(f"[ERROR] downloadUri не найден. Полный ответ: {status_data}", flush=True)
+                    import sys
+                    print(f"[ERROR] downloadUri не найден. Полный ответ: {status_data}", file=sys.stderr, flush=True)
                     raise Exception(f"downloadUri не найден в ответе статуса. Доступные ключи: {list(status_data.keys())}")
             elif status == "failed" or status == "error":
                 error_info = status_data.get("error", {})

@@ -137,9 +137,33 @@ const openaiClient = new OpenAI({
 let analysisRunner = null
 
 // Инициализация БД (Postgres/SQLite) и создание схемы
-const db = createDb()
+// Делаем инициализацию ленивой, чтобы сервер мог запуститься даже если БД недоступна
+let db = null
+let dbInitialized = false
+
+const getDb = () => {
+  if (!db && !dbInitialized) {
+    try {
+      db = createDb()
+      dbInitialized = true
+      console.log('✅ Database connection pool created')
+    } catch (error) {
+      console.error('⚠️ Database initialization failed:', error.message)
+      dbInitialized = true
+      // Пробрасываем ошибку, чтобы вызывающий код мог обработать её
+      throw error
+    }
+  }
+  if (!db) {
+    const errorMsg = 'Database not initialized. Please check DATABASE_URL environment variable.'
+    console.error('❌', errorMsg)
+    throw new Error(errorMsg)
+  }
+  return db
+}
 
 async function initSchema() {
+  const db = getDb()
   if (db.type === 'pg') {
     await db.exec(`
       CREATE TABLE IF NOT EXISTS reports (
@@ -273,15 +297,23 @@ async function initSchema() {
   console.log('✅ Database initialized with all tables')
 }
 
-initSchema().catch(e => {
-  console.error('❌ DB init failed', e)
-})
+// Инициализируем схему БД асинхронно после запуска сервера
+// Это не блокирует запуск сервера
+const initializeDatabase = async () => {
+  try {
+    await initSchema()
+  } catch (e) {
+    console.error('❌ DB init failed', e)
+    // Не пробрасываем ошибку - сервер должен работать даже без БД
+  }
+}
 
 // SQLite миграции удалены: проект использует только PostgreSQL
 
 // Вспомогательные функции для работы с БД
 const saveMessageToDB = async (sessionId, role, content, messageOrder) => {
   try {
+    const db = getDb()
     const insertMessage = db.prepare(`
       INSERT INTO messages (session_id, role, content, message_order)
       VALUES (?, ?, ?, ?)
@@ -301,6 +333,7 @@ const saveMessageToDB = async (sessionId, role, content, messageOrder) => {
 
 const saveFileToDB = async (sessionId, fileId, originalName, fileSize, mimeType, category) => {
   try {
+    const db = getDb()
     const insertFile = db.prepare(`
       INSERT INTO files (session_id, file_id, original_name, file_size, mime_type, category)
       VALUES (?, ?, ?, ?, ?, ?)
@@ -322,6 +355,7 @@ const saveFileToDB = async (sessionId, fileId, originalName, fileSize, mimeType,
 // Обновление категории уже сохраненного файла (по факту подтверждения от агента)
 const updateFileCategoryInDB = async (fileId, category) => {
   try {
+    const db = getDb()
     const updateStmt = db.prepare(`
       UPDATE files
       SET category = ?
@@ -395,6 +429,7 @@ const appendAssistantMessage = async (sessionId, text) => {
     const history = conversationHistory.get(sessionId)
     history.push({ role: 'assistant', content: [{ type: 'text', text }] })
 
+    const db = getDb()
     const countRow = await db
       .prepare(`SELECT COUNT(*) as cnt FROM messages WHERE session_id = ?`)
       .get(sessionId)
@@ -455,6 +490,7 @@ const maybeUpdateReportFromOpenAI = async (reportRow) => {
       openaiStatus,
     })
 
+    const db = getDb()
     const updatedRow = await db
       .prepare(
         `SELECT session_id, status, company_bin, amount, term, purpose, name, email, phone, comment, created_at, completed_at, files_count, files_data, report_text, tax_report_text, tax_status, tax_missing_periods, fs_report_text, fs_status, fs_missing_periods, openai_response_id, openai_status
@@ -475,6 +511,7 @@ const maybeUpdateReportFromOpenAI = async (reportRow) => {
 
 // Получение прогресса по сессии
 const getSessionProgress = async (sessionId) => {
+  const db = getDb()
   const rows = await db.prepare(`SELECT category, COUNT(*) as cnt FROM files WHERE session_id = ? GROUP BY category`).all(sessionId)
   const safeRows = Array.isArray(rows) ? rows : []
   if (!Array.isArray(rows)) {
@@ -490,6 +527,7 @@ const getSessionProgress = async (sessionId) => {
 
 const getMessagesFromDB = async (sessionId) => {
   try {
+    const db = getDb()
     const getMessages = db.prepare(`
       SELECT role, content, message_order
       FROM messages 
@@ -715,6 +753,7 @@ const extractOutputText = (response) => {
 const upsertReport = async (sessionId, payload) => {
   const { status, reportText, filesCount, filesData, completed, comment, openaiResponseId, openaiStatus } = payload
   try {
+    const db = getDb()
     const stmt = db.prepare(`
       INSERT INTO reports (session_id, status, report_text, files_count, files_data, completed_at, comment, openai_response_id, openai_status)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -822,6 +861,17 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
         
         const jsonResults = await convertPdfsToJson(pdfDataForConversion)
         console.log(`✅ Конвертация завершена: получено ${jsonResults.length} результат(ов)`)
+        console.log(`🔍 Полная структура результатов:`, JSON.stringify(jsonResults, null, 2))
+        console.log(`🔍 Структура результатов (краткая):`, JSON.stringify(jsonResults.map((r, idx) => ({
+          index: idx,
+          type: typeof r,
+          isArray: Array.isArray(r),
+          keys: r && typeof r === 'object' ? Object.keys(r) : [],
+          source_file: r?.source_file,
+          has_transactions: !!(r?.transactions),
+          transactions_count: r?.transactions ? (Array.isArray(r.transactions) ? r.transactions.length : 'not array') : 0,
+          has_error: !!r?.error
+        })), null, 2))
 
         // Объединяем все транзакции из всех файлов
         const allTransactions = []
@@ -833,8 +883,12 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
             continue
           }
           
+          // Проверяем структуру результата
           if (result.transactions && Array.isArray(result.transactions)) {
+            console.log(`📊 Добавляю ${result.transactions.length} транзакций из файла ${result.source_file}`)
             allTransactions.push(...result.transactions)
+          } else {
+            console.warn(`⚠️ Файл ${result.source_file} не содержит транзакций (transactions: ${typeof result.transactions}, isArray: ${Array.isArray(result.transactions)})`)
           }
           
           if (result.metadata) {
@@ -844,6 +898,8 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
             })
           }
         }
+        
+        console.log(`📊 Итого собрано транзакций: ${allTransactions.length}`)
 
         // Создаем JSON файл с результатами конвертации (даже если транзакций нет)
         const jsonData = {
@@ -1156,6 +1212,7 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
 
 app.get('/api/reports', async (_req, res) => {
   try {
+    const db = getDb()
     const rows = await db
       .prepare(
         `SELECT session_id, status, company_bin, amount, term, purpose, name, email, phone, comment, created_at, completed_at, files_count, files_data, report_text, openai_response_id, openai_status 
@@ -1177,6 +1234,7 @@ app.get('/api/reports', async (_req, res) => {
 app.get('/api/reports/:sessionId', async (req, res) => {
   const { sessionId } = req.params
   try {
+    const db = getDb()
     const row = await db
       .prepare(
         `SELECT session_id, status, company_bin, amount, term, purpose, name, email, phone, comment, created_at, completed_at, files_count, files_data, report_text, tax_report_text, tax_status, tax_missing_periods, fs_report_text, fs_status, fs_missing_periods, openai_response_id, openai_status
@@ -1216,6 +1274,7 @@ app.delete('/api/reports/:sessionId', async (req, res) => {
   }
 
   try {
+    const db = getDb()
     const existing = await db
       .prepare(`SELECT session_id FROM reports WHERE session_id = ?`)
       .get(sessionId)
@@ -1387,6 +1446,11 @@ const server = app.listen(port, '0.0.0.0', () => {
   console.log(`🏥 Ping: http://0.0.0.0:${port}/ping`)
   console.log(`🚀 Backend iKapitalist готов принимать запросы`)
   
+  // Инициализируем БД асинхронно после запуска сервера
+  initializeDatabase().catch((error) => {
+    console.error('⚠️ Ошибка инициализации БД (будет повторена при первом запросе):', error.message)
+  })
+  
   // Загружаем Agents SDK асинхронно после запуска сервера
   // Это не блокирует health check
   loadAgentsSDK()
@@ -1404,7 +1468,7 @@ const server = app.listen(port, '0.0.0.0', () => {
 const gracefulShutdown = (signal) => {
   console.log(`\n📛 Получен сигнал ${signal}, начинаем graceful shutdown...`)
   
-  server.close((err) => {
+  server.close(async (err) => {
     if (err) {
       console.error('❌ Ошибка при закрытии сервера:', err)
       process.exit(1)
@@ -1413,13 +1477,14 @@ const gracefulShutdown = (signal) => {
     console.log('✅ HTTP сервер закрыт')
     
     // Закрываем соединение с БД, если есть метод close
-    if (db && typeof db.close === 'function') {
-      try {
-        db.close()
+    try {
+      const dbInstance = db // Используем переменную из замыкания
+      if (dbInstance && typeof dbInstance.close === 'function') {
+        await dbInstance.close()
         console.log('✅ Соединение с БД закрыто')
-      } catch (dbError) {
-        console.error('⚠️ Ошибка при закрытии БД:', dbError)
       }
+    } catch (dbError) {
+      console.error('⚠️ Ошибка при закрытии БД:', dbError)
     }
     
     console.log('✅ Graceful shutdown завершен')

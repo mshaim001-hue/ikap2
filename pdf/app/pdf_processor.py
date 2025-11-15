@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 import os
 import re
+import sys
 import tempfile
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -17,6 +18,11 @@ except ImportError:
     pdfplumber = None  # type: ignore
 
 from .adobe_pdf_service import AdobePDFService
+
+# Функция для логирования в stderr (чтобы не мешать JSON в stdout)
+def _log_debug(msg: str) -> None:
+    """Выводит DEBUG лог в stderr."""
+    print(msg, file=sys.stderr, flush=True)
 
 @dataclass
 class ProcessedTable:
@@ -90,14 +96,28 @@ class PDFStatementProcessor:
         }
 
         # Инициализируем Adobe API сервис (обязательно)
-        self._adobe_service = AdobePDFService(
-            client_id=client_id,
-            client_secret=client_secret,
-            credentials_file=credentials_file,
-            region=region,
-            connect_timeout=connect_timeout,
-            read_timeout=read_timeout,
-        )
+        import sys
+        print(f"[PDF_PROCESSOR] Инициализация AdobePDFService...", file=sys.stderr, flush=True)
+        print(f"[PDF_PROCESSOR] client_id: {'✅ установлен' if client_id else '❌ не установлен'}", file=sys.stderr, flush=True)
+        print(f"[PDF_PROCESSOR] client_secret: {'✅ установлен' if client_secret else '❌ не установлен'}", file=sys.stderr, flush=True)
+        print(f"[PDF_PROCESSOR] credentials_file: {credentials_file or 'не установлен'}", file=sys.stderr, flush=True)
+        print(f"[PDF_PROCESSOR] region: {region or 'US (по умолчанию)'}", file=sys.stderr, flush=True)
+        
+        try:
+            self._adobe_service = AdobePDFService(
+                client_id=client_id,
+                client_secret=client_secret,
+                credentials_file=credentials_file,
+                region=region,
+                connect_timeout=connect_timeout,
+                read_timeout=read_timeout,
+            )
+            print(f"[PDF_PROCESSOR] ✅ AdobePDFService инициализирован успешно", file=sys.stderr, flush=True)
+        except Exception as e:
+            print(f"[PDF_PROCESSOR] ❌ Ошибка инициализации AdobePDFService: {e}", file=sys.stderr, flush=True)
+            import traceback
+            print(f"[PDF_PROCESSOR] Traceback: {traceback.format_exc()}", file=sys.stderr, flush=True)
+            raise
         
         # Для сохранения последнего Excel файла для просмотра
         self._last_excel_bytes: Optional[bytes] = None
@@ -350,7 +370,7 @@ class PDFStatementProcessor:
             
             # Проверяем, выглядит ли эта строка как заголовок таблицы
             if self._looks_like_table_header(row, next_row):
-                print(f"[DEBUG] Найден заголовок прямой проверкой (строка {idx}): выглядит как заголовок таблицы", flush=True)
+                _log_debug(f"[DEBUG] Найден заголовок прямой проверкой (строка {idx}): выглядит как заголовок таблицы")
                 # Дополнительно проверяем наличие кредита/дебета для уверенности
                 normalized = [self._normalize_header(str(cell)) for cell in row]
                 has_credit = any(
@@ -362,7 +382,7 @@ class PDFStatementProcessor:
 
         # ШАГ 2: Fallback - используем накопление только если прямой поиск не дал результата
         # НО: при накоплении тоже проверяем, что результат выглядит как заголовок таблицы
-        print(f"[DEBUG] Прямой поиск не дал результата, пробуем накопление с проверкой", flush=True)
+        _log_debug(f"[DEBUG] Прямой поиск не дал результата, пробуем накопление с проверкой")
         
         accumulated: Optional[pd.Series] = None
         accumulated_start_idx = None
@@ -386,11 +406,11 @@ class PDFStatementProcessor:
                 next_row = dataframe.iloc[idx + 1].fillna("").astype(str)
             
             if self._looks_like_table_header(accumulated, next_row):
-                print(f"[DEBUG] Найден заголовок накоплением (строки {accumulated_start_idx}-{idx}): выглядит как заголовок таблицы", flush=True)
+                _log_debug(f"[DEBUG] Найден заголовок накоплением (строки {accumulated_start_idx}-{idx}): выглядит как заголовок таблицы")
                 return idx, accumulated, True
 
         # ШАГ 3: Последний fallback - ищем первую строку с кредитом/дебетом (без строгой проверки)
-        print(f"[DEBUG] Накопление не дало результата, ищем первую строку с кредитом/дебетом", flush=True)
+        _log_debug(f"[DEBUG] Накопление не дало результата, ищем первую строку с кредитом/дебетом")
         
         for idx in range(min(len(dataframe), 50)):
             row = dataframe.iloc[idx].fillna("").astype(str)
@@ -398,18 +418,18 @@ class PDFStatementProcessor:
             
             # Ищем просто наличие кредита/дебета
             if any(cell in self.credit_headers | self.debit_headers for cell in normalized):
-                print(f"[DEBUG] Найдена строка {idx} с кредитом/дебетом как fallback", flush=True)
+                _log_debug(f"[DEBUG] Найдена строка {idx} с кредитом/дебетом как fallback")
                 return idx, row, True
             if any(
                 any(header in cell for header in self.credit_headers | self.debit_headers)
                 for cell in normalized
             ):
-                print(f"[DEBUG] Найдена строка {idx} с кредитом/дебетом (частичное совпадение) как fallback", flush=True)
+                _log_debug(f"[DEBUG] Найдена строка {idx} с кредитом/дебетом (частичное совпадение) как fallback")
                 return idx, row, True
 
         # Последний fallback - первая строка
         fallback = dataframe.iloc[0].fillna("").astype(str)
-        print(f"[DEBUG] Заголовок не найден, используем первую строку как последний fallback", flush=True)
+        _log_debug(f"[DEBUG] Заголовок не найден, используем первую строку как последний fallback")
         return None, fallback, False
 
     def _prepare_columns(self, header_series: pd.Series) -> List[str]:
@@ -476,12 +496,12 @@ class PDFStatementProcessor:
         fallback_columns: Optional[List[str]] = None,
     ) -> tuple[Optional[ProcessedTable], Optional[List[str]]]:
         if dataframe.empty:
-            print(f"[DEBUG] DataFrame пустой", flush=True)
+            _log_debug(f"[DEBUG] DataFrame пустой")
             return None, fallback_columns
 
-        print(f"[DEBUG] Ищу заголовок в DataFrame: {len(dataframe)} строк, {len(dataframe.columns)} колонок", flush=True)
+        _log_debug(f"[DEBUG] Ищу заголовок в DataFrame: {len(dataframe)} строк, {len(dataframe.columns)} колонок")
         header_idx, header_series, header_found = self._find_header_row(dataframe)
-        print(f"[DEBUG] Найден заголовок: idx={header_idx}, found={header_found}", flush=True)
+        _log_debug(f"[DEBUG] Найден заголовок: idx={header_idx}, found={header_found}")
 
         if header_found and header_series is not None and header_idx is not None:
             dataframe = dataframe.iloc[header_idx + 1 :].reset_index(drop=True)
@@ -512,17 +532,17 @@ class PDFStatementProcessor:
         dataframe = dataframe.replace(pd.NA, None)
         dataframe = self._consolidate_rows(dataframe)
         if dataframe.empty:
-            print(f"[DEBUG] DataFrame пустой после консолидации", flush=True)
+            _log_debug(f"[DEBUG] DataFrame пустой после консолидации")
             return None, fallback_columns
 
-        print(f"[DEBUG] Ищу колонку кредита среди колонок: {list(dataframe.columns)}", flush=True)
-        print(f"[DEBUG] Ищу колонку кредита среди заголовков: {self.credit_headers}", flush=True)
+        _log_debug(f"[DEBUG] Ищу колонку кредита среди колонок: {list(dataframe.columns)}")
+        _log_debug(f"[DEBUG] Ищу колонку кредита среди заголовков: {self.credit_headers}")
         credit_column_idx = self._detect_column(dataframe.columns, self.credit_headers)
         if credit_column_idx is None:
-            print(f"[ERROR] Не найдена колонка кредита! Доступные колонки: {list(dataframe.columns)}", flush=True)
+            print(f"[ERROR] Не найдена колонка кредита! Доступные колонки: {list(dataframe.columns)}", file=sys.stderr, flush=True)
             return None, fallback_columns
         
-        print(f"[DEBUG] Найдена колонка кредита: idx={credit_column_idx}, name={dataframe.columns[credit_column_idx]}", flush=True)
+        _log_debug(f"[DEBUG] Найдена колонка кредита: idx={credit_column_idx}, name={dataframe.columns[credit_column_idx]}")
 
         date_column_idx = self._detect_column(dataframe.columns, self.date_headers)
         debit_column_idx = self._detect_column(dataframe.columns, self.debit_headers)
@@ -542,7 +562,7 @@ class PDFStatementProcessor:
         for idx, row in dataframe.iterrows():
             row_number += 1
             if self._is_row_empty(row):
-                print(f"[DEBUG] Строка {row_number}: пропущена - пустая строка", flush=True)
+                _log_debug(f"[DEBUG] Строка {row_number}: пропущена - пустая строка")
                 continue
 
             # Сначала проверяем кредит - если есть кредит > 0, это может быть реальная операция
@@ -588,15 +608,15 @@ class PDFStatementProcessor:
             # Если это выглядит как реальная операция (есть кредит и номер документа), не пропускаем
             # Дата может быть не валидна из-за переносов строк, но это не значит, что это итоговая строка
             if contains_summary_keywords and not (has_credit and has_doc_no):
-                print(f"[DEBUG] Строка {row_number}: пропущена - итоговая строка (содержит: {[kw for kw in summary_keywords if kw in row_text]}, кредит: {has_credit}, №: {has_doc_no}, дата: {has_date})", flush=True)
+                _log_debug(f"[DEBUG] Строка {row_number}: пропущена - итоговая строка (содержит: {[kw for kw in summary_keywords if kw in row_text]}, кредит: {has_credit}, №: {has_doc_no}, дата: {has_date})")
                 continue
 
             # Если нет кредита, пропускаем
             if not has_credit:
-                print(f"[DEBUG] Строка {row_number}: пропущена - нет кредита (№ документа: {doc_no})", flush=True)
+                _log_debug(f"[DEBUG] Строка {row_number}: пропущена - нет кредита (№ документа: {doc_no})")
                 continue
             
-            print(f"[DEBUG] Строка {row_number}: найдена с кредитом {amount} (№: {doc_no}, Дата: {date_val if date_val else 'нет'}, значение: {credit_value})", flush=True)
+            _log_debug(f"[DEBUG] Строка {row_number}: найдена с кредитом {amount} (№: {doc_no}, Дата: {date_val if date_val else 'нет'}, значение: {credit_value})")
 
             # Если есть кредит и номер документа - это реальная операция, не пропускаем из-за даты
             # Дата может быть в любом формате или вообще отсутствовать - это не проблема
@@ -605,9 +625,9 @@ class PDFStatementProcessor:
                 if pd.isna(date_cell) or self._is_effectively_empty(date_cell):
                     # Если нет даты, но есть кредит и номер документа - оставляем строку
                     if has_credit and has_doc_no:
-                        print(f"[DEBUG] Строка {row_number}: дата пустая, но есть кредит и № документа - оставляем (№: {doc_no}, кредит: {amount})", flush=True)
+                        _log_debug(f"[DEBUG] Строка {row_number}: дата пустая, но есть кредит и № документа - оставляем (№: {doc_no}, кредит: {amount})")
                     else:
-                        print(f"[DEBUG] Строка {row_number}: пропущена - нет даты и нет кредита/№ документа (№: {doc_no})", flush=True)
+                        _log_debug(f"[DEBUG] Строка {row_number}: пропущена - нет даты и нет кредита/№ документа (№: {doc_no})")
                         continue
                 else:
                     # Извлекаем дату из ячейки, игнорируя текст после итоговых слов
@@ -625,7 +645,7 @@ class PDFStatementProcessor:
                     if summary_positions:
                         min_pos = min(summary_positions)
                         date_str_clean = date_str_full[:min_pos].strip()
-                        print(f"[DEBUG] Строка {row_number}: дата содержит итоговые слова, извлечена дата: '{date_str_clean}' из '{date_str_full[:50]}...'", flush=True)
+                        _log_debug(f"[DEBUG] Строка {row_number}: дата содержит итоговые слова, извлечена дата: '{date_str_clean}' из '{date_str_full[:50]}...'")
                     else:
                         date_str_clean = date_str_full
                     
@@ -634,9 +654,9 @@ class PDFStatementProcessor:
                         # Если дата не валидна, но есть кредит и номер документа - оставляем строку
                         # Дата может быть в странном формате (например, "YYYY-00-DD 00:00:SS"), это не проблема
                         if has_credit and has_doc_no:
-                            print(f"[DEBUG] Строка {row_number}: дата в странном формате '{date_str_clean}', но есть кредит и № документа - оставляем (№: {doc_no}, кредит: {amount})", flush=True)
+                            _log_debug(f"[DEBUG] Строка {row_number}: дата в странном формате '{date_str_clean}', но есть кредит и № документа - оставляем (№: {doc_no}, кредит: {amount})")
                         else:
-                            print(f"[DEBUG] Строка {row_number}: пропущена - дата не валидна и нет кредита/№ документа (№: {doc_no}, дата: '{date_str_clean}')", flush=True)
+                            _log_debug(f"[DEBUG] Строка {row_number}: пропущена - дата не валидна и нет кредита/№ документа (№: {doc_no}, дата: '{date_str_clean}')")
                             continue
 
             # Проверяем дебет - пропускаем строку если есть дебет
@@ -651,16 +671,16 @@ class PDFStatementProcessor:
                     if debit_amount is not None and debit_amount > 0:
                         # Если есть и кредит, и дебет - пропускаем
                         if amount is not None and amount > 0:
-                            print(f"[DEBUG] Строка {row_number}: пропущена - есть кредит {amount} и дебет {debit_amount} (№: {doc_no})", flush=True)
+                            _log_debug(f"[DEBUG] Строка {row_number}: пропущена - есть кредит {amount} и дебет {debit_amount} (№: {doc_no})")
                             continue
                         # Если только дебет, нет кредита - пропускаем
-                        print(f"[DEBUG] Строка {row_number}: пропущена - есть дебет {debit_amount}, но нет кредита (№: {doc_no})", flush=True)
+                        _log_debug(f"[DEBUG] Строка {row_number}: пропущена - есть дебет {debit_amount}, но нет кредита (№: {doc_no})")
                         continue
                     elif debit_amount is None and debit_value.lower() not in self._empty_tokens:
                         # Дебет не распознан как число, но есть текст
                         # Пропускаем только если нет кредита
                         if amount is None or amount == 0:
-                            print(f"[DEBUG] Строка {row_number}: пропущена - дебет не распознан, нет кредита (№: {doc_no})", flush=True)
+                            _log_debug(f"[DEBUG] Строка {row_number}: пропущена - дебет не распознан, нет кредита (№: {doc_no})")
                             continue
 
             sanitized_row: Dict[str, str] = {}
@@ -725,24 +745,24 @@ class PDFStatementProcessor:
                 sanitized_row[date_column_name] = date_value
 
             if not sanitized_row:
-                print(f"[DEBUG] Строка {row_number}: пропущена - пустой sanitized_row после обработки (№: {doc_no})", flush=True)
+                _log_debug(f"[DEBUG] Строка {row_number}: пропущена - пустой sanitized_row после обработки (№: {doc_no})")
                 continue
 
-            print(f"[DEBUG] Строка {row_number}: ✅ ДОБАВЛЕНА в результат (№: {doc_no}, Кредит: {amount})", flush=True)
+            _log_debug(f"[DEBUG] Строка {row_number}: ✅ ДОБАВЛЕНА в результат (№: {doc_no}, Кредит: {amount})")
             filtered_rows.append(sanitized_row)
 
         if not filtered_rows:
-            print(f"[DEBUG] Не найдено строк для обработки", flush=True)
+            _log_debug(f"[DEBUG] Не найдено строк для обработки")
             return None, fallback_columns
 
-        print(f"[DEBUG] Итого добавлено в результат: {len(filtered_rows)} строк", flush=True)
+        _log_debug(f"[DEBUG] Итого добавлено в результат: {len(filtered_rows)} строк")
         
         # Выводим номера документов из результата для проверки
         doc_numbers = []
         for row in filtered_rows:
             if "№" in row:
                 doc_numbers.append(row["№"])
-        print(f"[DEBUG] Номера документов в результате: {doc_numbers[:10]}..." if len(doc_numbers) > 10 else f"[DEBUG] Номера документов в результате: {doc_numbers}", flush=True)
+        _log_debug(f"[DEBUG] Номера документов в результате: {doc_numbers[:10]}..." if len(doc_numbers) > 10 else f"[DEBUG] Номера документов в результате: {doc_numbers}")
 
         return (
             ProcessedTable(page_number=page_number, bank_name=bank_name, rows=filtered_rows),
@@ -753,7 +773,7 @@ class PDFStatementProcessor:
         if dataframe.empty:
             return dataframe
 
-        print(f"[DEBUG] Консолидация строк: было {len(dataframe)} строк", flush=True)
+        _log_debug(f"[DEBUG] Консолидация строк: было {len(dataframe)} строк")
         columns = list(dataframe.columns)
         date_pattern = re.compile(r"\d{2}\.\d{2}\.\d{2,4}")
         results: List[Dict[str, Optional[str]]] = []
@@ -858,11 +878,11 @@ class PDFStatementProcessor:
         if current:
             results.append(current)
 
-        print(f"[DEBUG] Консолидация завершена: обработано {processed_rows} строк, пропущено пустых {skipped_empty}, пропущено заголовков {skipped_headers}, создано записей {len(results)}", flush=True)
+        _log_debug(f"[DEBUG] Консолидация завершена: обработано {processed_rows} строк, пропущено пустых {skipped_empty}, пропущено заголовков {skipped_headers}, создано записей {len(results)}")
         
         result_df = pd.DataFrame(results)
         result_df = result_df.replace("", pd.NA).dropna(how="all")
-        print(f"[DEBUG] После dropna: осталось {len(result_df)} строк", flush=True)
+        _log_debug(f"[DEBUG] После dropna: осталось {len(result_df)} строк")
         return result_df.reset_index(drop=True)
 
     def extract(self, pdf_bytes: bytes, bank_name: Optional[str] = None) -> StatementExtraction:
@@ -887,18 +907,25 @@ class PDFStatementProcessor:
 
         try:
             # ШАГ 1: Конвертируем PDF в Excel через Adobe API
-            print(f"[INFO] Отправка PDF в Adobe API для конвертации в Excel...", flush=True)
+            import sys
+            print(f"[PDF_PROCESSOR] ========== НАЧАЛО ИЗВЛЕЧЕНИЯ ==========", file=sys.stderr, flush=True)
+            print(f"[PDF_PROCESSOR] Размер PDF: {len(pdf_bytes)} байт", file=sys.stderr, flush=True)
+            print(f"[PDF_PROCESSOR] Имя файла: {bank_name or 'не указано'}", file=sys.stderr, flush=True)
+            print(f"[PDF_PROCESSOR] Отправка PDF в Adobe API для конвертации в Excel...", file=sys.stderr, flush=True)
             
             # Получаем исходные байты Excel файла
             excel_bytes = self._adobe_service.convert_pdf_to_excel(pdf_bytes, filename=bank_name)
+            print(f"[PDF_PROCESSOR] ✅ Excel файл получен от Adobe API: {len(excel_bytes)} байт", file=sys.stderr, flush=True)
             
             # Сохраняем исходный Excel файл для возможности просмотра
             self._save_last_excel_bytes(excel_bytes, bank_name)
             
             # Конвертируем Excel байты в DataFrame для обработки
+            print(f"[PDF_PROCESSOR] Чтение Excel файла в DataFrame...", file=sys.stderr, flush=True)
             excel_file = io.BytesIO(excel_bytes)
             excel_df = pd.read_excel(excel_file, sheet_name=0, engine="openpyxl")
-            print(f"[INFO] Adobe API вернул Excel файл с {len(excel_df)} строками", flush=True)
+            print(f"[PDF_PROCESSOR] ✅ Excel файл прочитан: {len(excel_df)} строк, {len(excel_df.columns)} колонок", file=sys.stderr, flush=True)
+            print(f"[PDF_PROCESSOR] Колонки в Excel: {list(excel_df.columns)}", file=sys.stderr, flush=True)
 
             # ШАГ 2: Извлекаем метаданные из PDF (опционально, если pdfplumber доступен)
             if pdfplumber is not None:
@@ -906,7 +933,8 @@ class PDFStatementProcessor:
                     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
                         metadata = self._extract_metadata(pdf)
                 except Exception as e:
-                    print(f"[WARNING] Не удалось извлечь метаданные: {e}", flush=True)
+                    import sys
+                    print(f"[WARNING] Не удалось извлечь метаданные: {e}", file=sys.stderr, flush=True)
                     metadata = {}
             else:
                 metadata = {}
@@ -916,29 +944,42 @@ class PDFStatementProcessor:
 
             # ШАГ 3: Обрабатываем Excel DataFrame для извлечения строк с кредитом
             if not excel_df.empty:
-                print(f"[DEBUG] Начинаю обработку DataFrame: {len(excel_df)} строк, {len(excel_df.columns)} колонок", flush=True)
-                print(f"[DEBUG] Колонки: {list(excel_df.columns)}", flush=True)
+                _log_debug(f"[DEBUG] Начинаю обработку DataFrame: {len(excel_df)} строк, {len(excel_df.columns)} колонок")
+                _log_debug(f"[DEBUG] Колонки: {list(excel_df.columns)}")
                 try:
                     processed, _ = self._process_dataframe(
                         excel_df, page_number=1, bank_name=bank_name, fallback_columns=None
                     )
                     if processed:
                         tables.append(processed)
-                        print(f"[INFO] Извлечено {len(processed.rows)} строк с кредитом", flush=True)
+                        import sys
+                        print(f"[INFO] Извлечено {len(processed.rows)} строк с кредитом", file=sys.stderr, flush=True)
                     else:
-                        print(f"[WARNING] Не удалось обработать таблицу из Excel: processed вернул None", flush=True)
+                        import sys
+                        print(f"[WARNING] Не удалось обработать таблицу из Excel: processed вернул None", file=sys.stderr, flush=True)
                 except Exception as e:
-                    print(f"[ERROR] Ошибка при обработке DataFrame: {e}", flush=True)
+                    import sys
+                    print(f"[ERROR] Ошибка при обработке DataFrame: {e}", file=sys.stderr, flush=True)
                     import traceback
-                    print(f"[ERROR] Traceback: {traceback.format_exc()}", flush=True)
+                    print(f"[ERROR] Traceback: {traceback.format_exc()}", file=sys.stderr, flush=True)
                     raise
 
         except Exception as e:
-            print(f"[ERROR] Ошибка при обработке через Adobe API: {e}", flush=True)
+            import sys
+            print(f"[PDF_PROCESSOR] ❌ Ошибка при обработке через Adobe API: {e}", file=sys.stderr, flush=True)
+            import traceback
+            print(f"[PDF_PROCESSOR] Traceback: {traceback.format_exc()}", file=sys.stderr, flush=True)
             metadata["extraction_method"] = "adobe_pdf_services_api_failed"
             metadata["error"] = str(e)
             raise  # Пробрасываем ошибку, т.к. у нас нет fallback
 
+        import sys
+        print(f"[PDF_PROCESSOR] ========== ЗАВЕРШЕНИЕ ИЗВЛЕЧЕНИЯ ==========", file=sys.stderr, flush=True)
+        print(f"[PDF_PROCESSOR] Найдено таблиц: {len(tables)}", file=sys.stderr, flush=True)
+        total_rows = sum(len(table.rows) for table in tables)
+        print(f"[PDF_PROCESSOR] Всего строк с кредитом: {total_rows}", file=sys.stderr, flush=True)
+        print(f"[PDF_PROCESSOR] Метаданные: {len(metadata)} ключей", file=sys.stderr, flush=True)
+        
         return StatementExtraction(bank_name=bank_name, metadata=metadata, tables=tables)
 
     def _save_last_excel_bytes(self, excel_bytes: bytes, filename: Optional[str] = None) -> None:
@@ -955,9 +996,11 @@ class PDFStatementProcessor:
                 self._last_excel_filename = filename
             else:
                 self._last_excel_filename = "converted.xlsx"
-            print(f"[INFO] Excel файл сохранен для просмотра: {self._last_excel_filename} (размер: {len(excel_bytes)} байт)", flush=True)
+            import sys
+            print(f"[INFO] Excel файл сохранен для просмотра: {self._last_excel_filename} (размер: {len(excel_bytes)} байт)", file=sys.stderr, flush=True)
         except Exception as e:
-            print(f"[WARNING] Не удалось сохранить Excel файл для просмотра: {e}", flush=True)
+            import sys
+            print(f"[WARNING] Не удалось сохранить Excel файл для просмотра: {e}", file=sys.stderr, flush=True)
     
     def get_last_excel(self) -> tuple[Optional[bytes], Optional[str]]:
         """Возвращает последний Excel файл и его имя."""

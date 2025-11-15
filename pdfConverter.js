@@ -143,6 +143,18 @@ async function convertPdfToJsonViaPython(pdfBuffer, filename, customPdfServicePa
       const runPythonConversion = () => {
         console.log(`🐍 Используем Python: ${actualPythonExecutable}`)
         console.log(`📁 Рабочая директория: ${resolvedPdfServicePath}`)
+        console.log(`📄 PDF файл: ${tempPdfPath} (${pdfBuffer.length} bytes)`)
+        
+        // Логируем переменные окружения Adobe API (без секретов)
+        const adobeClientId = pythonEnv.ADOBE_CLIENT_ID || process.env.ADOBE_CLIENT_ID
+        const adobeCredentialsFile = pythonEnv.ADOBE_CREDENTIALS_FILE || process.env.ADOBE_CREDENTIALS_FILE
+        console.log(`🔑 Adobe API Client ID: ${adobeClientId ? '✅ установлен' : '❌ НЕ установлен'}`)
+        console.log(`🔑 Adobe API Credentials File: ${adobeCredentialsFile || 'не установлен'}`)
+        console.log(`🌍 Adobe API Region: ${pythonEnv.ADOBE_REGION || process.env.ADOBE_REGION || 'US (по умолчанию)'}`)
+        
+        // Логируем команду запуска
+        const command = `${actualPythonExecutable} -m app.cli ${tempPdfPath} --json`
+        console.log(`🚀 Команда: ${command}`)
         
         // Запускаем как модуль, чтобы относительные импорты работали
         // Используем: python3 -m app.cli file.pdf --json
@@ -156,14 +168,24 @@ async function convertPdfToJsonViaPython(pdfBuffer, filename, customPdfServicePa
         let stderr = ''
 
         pythonProcess.stdout.on('data', (data) => {
-          stdout += data.toString()
+          const chunk = data.toString()
+          stdout += chunk
+          // Логируем вывод в реальном времени для отладки
+          process.stdout.write(`[PYTHON STDOUT] ${chunk}`)
         })
 
         pythonProcess.stderr.on('data', (data) => {
-          stderr += data.toString()
+          const chunk = data.toString()
+          stderr += chunk
+          // Логируем ошибки в реальном времени
+          console.error(`[PYTHON STDERR] ${chunk}`)
         })
 
         pythonProcess.on('close', async (code) => {
+          console.log(`\n📊 Python процесс завершен с кодом: ${code}`)
+          console.log(`📏 Размер stdout: ${stdout.length} символов`)
+          console.log(`📏 Размер stderr: ${stderr.length} символов`)
+          
           // Удаляем временный файл
           try {
             await unlink(tempPdfPath)
@@ -172,8 +194,10 @@ async function convertPdfToJsonViaPython(pdfBuffer, filename, customPdfServicePa
           }
 
           if (code !== 0) {
-            console.error('❌ Python скрипт завершился с ошибкой:', stderr)
-            reject(new Error(`Python скрипт завершился с кодом ${code}: ${stderr}`))
+            console.error('❌ Python скрипт завершился с ошибкой')
+            console.error('📋 Полный stderr:', stderr)
+            console.error('📋 Полный stdout:', stdout)
+            reject(new Error(`Python скрипт завершился с кодом ${code}: ${stderr || stdout}`))
             return
           }
 
@@ -197,50 +221,269 @@ async function convertPdfToJsonViaPython(pdfBuffer, filename, customPdfServicePa
             let jsonString = stdoutTrimmed
             
             // Пытаемся найти JSON блок - ищем последний блок, начинающийся с [ или {
-            const jsonStartIndex = Math.max(
-              stdoutTrimmed.lastIndexOf('['),
-              stdoutTrimmed.lastIndexOf('{')
-            )
+            // Python скрипт всегда возвращает массив, поэтому ищем последний [
+            const jsonStartIndex = stdoutTrimmed.lastIndexOf('[')
             
-            if (jsonStartIndex > 0) {
+            // Если не нашли [, ищем {
+            const jsonStartIndexBrace = jsonStartIndex >= 0 ? jsonStartIndex : stdoutTrimmed.lastIndexOf('{')
+            
+            if (jsonStartIndex >= 0 || jsonStartIndexBrace >= 0) {
+              const actualStartIndex = jsonStartIndex >= 0 ? jsonStartIndex : jsonStartIndexBrace
               // Найден JSON блок, извлекаем его
-              let extractedJson = stdoutTrimmed.substring(jsonStartIndex)
+              let extractedJson = stdoutTrimmed.substring(actualStartIndex)
               
               // Находим конец JSON, пробуя парсить с конца строки
               // Уменьшаем длину строки, пока не получим валидный JSON
               let jsonEndIndex = extractedJson.length
               let foundValidJson = false
+              let jsonString = null  // Будет установлен при успешном извлечении
               
               // Пробуем найти конец JSON, начиная с конца строки
-              for (let i = extractedJson.length; i > 0; i--) {
-                const testJson = extractedJson.substring(0, i).trim()
-                if (testJson.length === 0) continue
+              // Ищем закрывающую скобку/квадратную скобку, которая завершает JSON
+              // Важно: если JSON начинается с [, он должен заканчиваться на ]
+              const startsWithBracket = extractedJson.trim().startsWith('[')
+              
+              // Сначала пробуем найти правильный конец JSON, используя подсчет скобок
+              // Это более надежный способ для вложенных структур
+              if (startsWithBracket) {
+                let bracketCount = 0
+                let jsonEnd = -1
                 
-                try {
-                  // Пробуем распарсить - если успешно, значит это валидный JSON
-                  JSON.parse(testJson)
-                  jsonEndIndex = i
-                  foundValidJson = true
-                  break
-                } catch (e) {
-                  // Продолжаем искать
-                  continue
+                for (let i = 0; i < extractedJson.length; i++) {
+                  const char = extractedJson[i]
+                  if (char === '[') {
+                    bracketCount++
+                  } else if (char === ']') {
+                    bracketCount--
+                    if (bracketCount === 0) {
+                      // Нашли закрывающую скобку, соответствующую открывающей
+                      jsonEnd = i + 1
+                      break
+                    }
+                  }
+                }
+                
+                if (jsonEnd > 0) {
+                  const testJson = extractedJson.substring(0, jsonEnd).trim()
+                  try {
+                    const parsed = JSON.parse(testJson)
+                    if (Array.isArray(parsed) && parsed.length > 0) {
+                      const firstItem = parsed[0]
+                      if (firstItem && typeof firstItem === 'object') {
+                        const hasSourceFile = 'source_file' in firstItem
+                        const hasTransactions = 'transactions' in firstItem
+                        const hasTransactionKeys = 'page_number' in firstItem || 'Дата' in firstItem || 'Кредит' in firstItem
+                        
+                        // Если это документ с правильной структурой
+                        if ((hasSourceFile || hasTransactions) && !(hasTransactionKeys && !hasSourceFile && !hasTransactions)) {
+                          console.log(`✅ Найден правильный JSON через подсчет скобок: массив с документом (source_file: ${hasSourceFile}, transactions: ${hasTransactions ? parsed[0].transactions?.length : 0})`)
+                          jsonString = testJson
+                          foundValidJson = true
+                        }
+                      }
+                    }
+                  } catch (e) {
+                    // Если не получилось через подсчет скобок, используем старый метод
+                    console.log(`⚠️ Не удалось распарсить JSON через подсчет скобок, пробуем другой метод...`)
+                  }
+                }
+              }
+              
+              // Если не нашли через подсчет скобок, используем старый метод
+              if (!foundValidJson) {
+                for (let i = extractedJson.length; i > 0; i--) {
+                  const testJson = extractedJson.substring(0, i).trim()
+                  if (testJson.length === 0) continue
+                  
+                  // Проверяем, что строка заканчивается на ] или }
+                  const lastChar = testJson[testJson.length - 1]
+                  
+                  // Если JSON начинается с [, он должен заканчиваться на ]
+                  if (startsWithBracket && lastChar !== ']') continue
+                  if (!startsWithBracket && lastChar !== ']' && lastChar !== '}') continue
+                  
+                  try {
+                    // Пробуем распарсить - если успешно, значит это валидный JSON
+                    const parsed = JSON.parse(testJson)
+                    
+                    // Дополнительная проверка: если это массив, проверяем структуру первого элемента
+                    if (Array.isArray(parsed)) {
+                      if (parsed.length > 0) {
+                        const firstItem = parsed[0]
+                        // Проверяем, что это документ (имеет source_file или transactions), а не транзакция
+                        if (firstItem && typeof firstItem === 'object') {
+                          const hasSourceFile = 'source_file' in firstItem
+                          const hasTransactions = 'transactions' in firstItem
+                          const hasTransactionKeys = 'page_number' in firstItem || 'Дата' in firstItem || 'Кредит' in firstItem
+                          
+                          // Если это транзакция (имеет ключи транзакции, но нет source_file и transactions), это неправильно
+                          if (hasTransactionKeys && !hasSourceFile && !hasTransactions) {
+                            // Это транзакция, а не документ - продолжаем искать
+                            continue
+                          }
+                          
+                          // Если это документ с транзакциями - это правильный JSON
+                          if (hasSourceFile || hasTransactions) {
+                            console.log(`✅ Найден правильный JSON: массив с документом (source_file: ${hasSourceFile}, transactions: ${hasTransactions ? parsed[0].transactions?.length : 0})`)
+                            jsonEndIndex = i
+                            foundValidJson = true
+                            break
+                          }
+                        }
+                      } else {
+                        // Пустой массив - это тоже валидный JSON, но не то, что нам нужно
+                        continue
+                      }
+                    } else {
+                      // Это не массив - продолжаем искать
+                      continue
+                    }
+                  } catch (e) {
+                    // Продолжаем искать
+                    continue
+                  }
                 }
               }
               
               if (foundValidJson) {
-                jsonString = extractedJson.substring(0, jsonEndIndex).trim()
-                console.log(`📝 Извлечен JSON из stdout (пропущено ${jsonStartIndex} символов до JSON, ${extractedJson.length - jsonEndIndex} символов после)`)
+                // Если jsonString еще не установлен (через подсчет скобок), устанавливаем его
+                if (!jsonString) {
+                  jsonString = extractedJson.substring(0, jsonEndIndex).trim()
+                }
+                const jsonLength = jsonString.length
+                console.log(`📝 Извлечен JSON из stdout (пропущено ${actualStartIndex} символов до JSON, ${extractedJson.length - jsonLength} символов после)`)
+                
+                // Проверяем, что мы извлекли правильный JSON - он должен быть массивом
+                try {
+                  const testParse = JSON.parse(jsonString)
+                  if (Array.isArray(testParse) && testParse.length > 0) {
+                    console.log(`✅ Извлеченный JSON - массив из ${testParse.length} элементов`)
+                    if (testParse[0].transactions) {
+                      console.log(`✅ Первый элемент содержит ${testParse[0].transactions.length} транзакций`)
+                    }
+                  } else if (testParse && typeof testParse === 'object') {
+                    console.log(`⚠️ Извлеченный JSON - объект, а не массив. Ключи: ${Object.keys(testParse).join(', ')}`)
+                  }
+                } catch (e) {
+                  console.warn(`⚠️ Не удалось проверить извлеченный JSON: ${e.message}`)
+                }
               } else {
-                // Если не нашли валидный JSON, используем весь блок
-                jsonString = extractedJson
-                console.log(`⚠️ Не удалось найти конец JSON, используем весь блок после позиции ${jsonStartIndex}`)
+                // Если не нашли валидный JSON, пробуем найти закрывающую скобку вручную
+                // Ищем последнюю закрывающую скобку/квадратную скобку
+                const lastBrace = extractedJson.lastIndexOf('}')
+                const lastBracket = extractedJson.lastIndexOf(']')
+                const lastClose = Math.max(lastBrace, lastBracket)
+                
+                if (lastClose > 0) {
+                  // Берем все до последней закрывающей скобки + 1
+                  const candidateJson = extractedJson.substring(0, lastClose + 1).trim()
+                  console.log(`📝 Извлечен JSON по закрывающей скобке (позиция ${lastClose})`)
+                  
+                  // Проверяем результат
+                  try {
+                    const testParse = JSON.parse(candidateJson)
+                    if (Array.isArray(testParse)) {
+                      console.log(`✅ JSON по закрывающей скобке - массив из ${testParse.length} элементов`)
+                      jsonString = candidateJson
+                      foundValidJson = true
+                    } else {
+                      console.warn(`⚠️ JSON по закрывающей скобке - не массив, а ${typeof testParse}`)
+                      jsonString = candidateJson  // Все равно используем, если это валидный JSON
+                    }
+                  } catch (e) {
+                    console.warn(`⚠️ Не удалось проверить JSON: ${e.message}`)
+                    jsonString = candidateJson  // Пробуем использовать, даже если не удалось распарсить
+                  }
+                } else {
+                  // Если не нашли закрывающую скобку, используем весь блок
+                  jsonString = extractedJson
+                  console.log(`⚠️ Не удалось найти конец JSON, используем весь блок после позиции ${actualStartIndex}`)
+                }
               }
+            }
+            
+            // Если jsonString все еще не установлен, используем весь stdout
+            if (!jsonString) {
+              jsonString = stdoutTrimmed
+              console.log(`⚠️ JSON строка не установлена, используем весь stdout`)
             }
 
             // Парсим JSON
-            const result = JSON.parse(jsonString)
+            let result
+            try {
+              console.log(`🔍 Парсинг JSON строки (длина: ${jsonString.length}, первые 100 символов: ${jsonString.substring(0, 100)})`)
+              result = JSON.parse(jsonString)
+              console.log(`✅ JSON успешно распарсен. Тип: ${Array.isArray(result) ? 'массив' : typeof result}`)
+            } catch (parseError) {
+              console.error('❌ Ошибка парсинга JSON:', parseError.message)
+              console.error('JSON строка (первые 500 символов):', jsonString.substring(0, 500))
+              console.error('JSON строка (последние 200 символов):', jsonString.substring(Math.max(0, jsonString.length - 200)))
+              throw parseError
+            }
+            
             console.log(`✅ PDF конвертирован в JSON: найдено ${Array.isArray(result) ? result.length : 1} файл(ов)`)
+            
+            // Логируем структуру для отладки
+            if (Array.isArray(result) && result.length > 0) {
+              console.log(`🔍 Первый результат (массив):`, JSON.stringify({
+                has_source_file: !!result[0].source_file,
+                source_file: result[0].source_file,
+                has_transactions: !!result[0].transactions,
+                transactions_count: result[0].transactions ? result[0].transactions.length : 0,
+                has_metadata: !!result[0].metadata,
+                keys: Object.keys(result[0]),
+                first_transaction_keys: result[0].transactions && result[0].transactions.length > 0 ? Object.keys(result[0].transactions[0]) : null
+              }, null, 2))
+            } else if (result && typeof result === 'object') {
+              console.log(`🔍 Результат (не массив):`, JSON.stringify({
+                has_source_file: !!result.source_file,
+                source_file: result.source_file,
+                has_transactions: !!result.transactions,
+                transactions_count: result.transactions ? result.transactions.length : 0,
+                has_metadata: !!result.metadata,
+                keys: Object.keys(result)
+              }, null, 2))
+              
+              // Если это транзакция, а не документ - это проблема
+              if (!result.source_file && !result.transactions && ('page_number' in result || 'Дата' in result || 'Кредит' in result)) {
+                console.error(`❌ КРИТИЧЕСКАЯ ОШИБКА: Извлеченная JSON строка содержит транзакцию вместо документа!`)
+                console.error(`❌ Это означает, что мы извлекли не весь JSON. Нужно найти правильный конец массива.`)
+                console.error(`❌ JSON строка (первые 200 символов):`, jsonString.substring(0, 200))
+                console.error(`❌ JSON строка (последние 200 символов):`, jsonString.substring(Math.max(0, jsonString.length - 200)))
+              }
+            }
+            
+            // Python скрипт всегда возвращает массив документов
+            // Каждый документ имеет структуру: {source_file, metadata, transactions}
+            // Проверяем, что структура правильная
+            if (Array.isArray(result)) {
+              // Проверяем каждый элемент массива
+              for (let i = 0; i < result.length; i++) {
+                if (!result[i] || typeof result[i] !== 'object') {
+                  console.warn(`⚠️ Элемент ${i} массива не является объектом:`, typeof result[i])
+                } else if (!result[i].source_file && !result[i].transactions) {
+                  // Если это не документ, а транзакция - оборачиваем в документ
+                  console.warn(`⚠️ Элемент ${i} похож на транзакцию, а не документ. Оборачиваем в документ.`)
+                  result[i] = {
+                    source_file: filename,
+                    metadata: {},
+                    transactions: [result[i]]
+                  }
+                }
+              }
+            } else if (result && typeof result === 'object') {
+              // Если это один объект, проверяем его структуру
+              if (!result.source_file && !result.transactions) {
+                // Если это транзакция, а не документ - оборачиваем
+                console.warn(`⚠️ Результат похож на транзакцию, а не документ. Оборачиваем в документ.`)
+                result = {
+                  source_file: filename,
+                  metadata: {},
+                  transactions: [result]
+                }
+              }
+            }
+            
             resolve(Array.isArray(result) ? result : [result])
           } catch (parseError) {
             console.error('❌ Ошибка парсинга JSON:', parseError.message)
@@ -311,10 +554,40 @@ async function convertPdfsToJson(files) {
       const result = await convertPdfToJson(file.buffer, file.filename)
       
       // Результат может быть массивом (если несколько файлов) или объектом
+      // Python скрипт всегда возвращает массив документов: [{source_file, metadata, transactions}, ...]
+      console.log(`🔍 Результат convertPdfToJson для ${file.filename}:`, {
+        isArray: Array.isArray(result),
+        length: Array.isArray(result) ? result.length : 1,
+        firstItem: Array.isArray(result) && result.length > 0 ? {
+          has_source_file: !!result[0].source_file,
+          source_file: result[0].source_file,
+          has_transactions: !!result[0].transactions,
+          transactions_count: result[0].transactions ? result[0].transactions.length : 0,
+          keys: Object.keys(result[0])
+        } : (result && typeof result === 'object' ? {
+          has_source_file: !!result.source_file,
+          source_file: result.source_file,
+          has_transactions: !!result.transactions,
+          transactions_count: result.transactions ? result.transactions.length : 0,
+          keys: Object.keys(result)
+        } : result)
+      })
+      
+      // Python скрипт возвращает массив документов, каждый документ имеет структуру:
+      // {source_file: string, metadata: object, transactions: array}
+      // Мы просто добавляем все документы в results
       if (Array.isArray(result)) {
-        results.push(...result)
-      } else {
+        // Если это массив документов, добавляем каждый документ
+        for (const doc of result) {
+          if (doc && typeof doc === 'object') {
+            results.push(doc)
+          }
+        }
+      } else if (result && typeof result === 'object') {
+        // Если это один документ, добавляем его
         results.push(result)
+      } else {
+        console.warn(`⚠️ Неожиданный тип результата: ${typeof result}`, result)
       }
     } catch (error) {
       console.error(`❌ Ошибка конвертации файла ${file.filename}:`, error.message)
