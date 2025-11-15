@@ -1,4 +1,24 @@
+// Минимальная загрузка для быстрого запуска
 const express = require('express')
+const app = express()
+
+app.set('etag', false)
+
+// Health check endpoints должны быть САМЫМИ ПЕРВЫМИ
+// Это критично для Render.com - они должны отвечать ДО загрузки всех модулей
+app.get('/health', (req, res) => {
+  res.status(200).json({ 
+    status: 'ok', 
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime()
+  })
+})
+
+app.get('/ping', (req, res) => {
+  res.status(200).send('pong')
+})
+
+// Теперь загружаем остальные модули после регистрации health check
 const cors = require('cors')
 const multer = require('multer')
 const OpenAI = require('openai')
@@ -17,8 +37,6 @@ const upload = multer({
   // Лимит для PDF файлов (выписки, налоговая и финансовая отчетность)
   limits: { fileSize: 50 * 1024 * 1024 } // 50MB лимит на один файл
 })
-
-const app = express()
 
 // Agents SDK будет загружен асинхронно после запуска сервера
 // Это ускоряет запуск и позволяет health check отвечать сразу
@@ -41,22 +59,6 @@ const loadAgentsSDK = async () => {
     throw error
   }
 }
-
-app.set('etag', false)
-
-// Health check endpoints должны быть самыми первыми, чтобы отвечать сразу
-// Это критично для Render.com и других платформ
-app.get('/health', (req, res) => {
-  res.status(200).json({ 
-    status: 'ok', 
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime()
-  })
-})
-
-app.get('/ping', (req, res) => {
-  res.status(200).send('pong')
-})
 
 const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS || 1200000)
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY
