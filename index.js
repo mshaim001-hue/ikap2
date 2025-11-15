@@ -18,12 +18,29 @@ const upload = multer({
   limits: { fileSize: 50 * 1024 * 1024 } // 50MB лимит на один файл
 })
 
-console.log('Loading Agents SDK...')
-const { Agent, Runner, codeInterpreterTool } = require('@openai/agents')
-const { z } = require('zod')
-console.log('Agents SDK loaded successfully')
-
 const app = express()
+
+// Agents SDK будет загружен асинхронно после запуска сервера
+// Это ускоряет запуск и позволяет health check отвечать сразу
+let Agent, Runner, codeInterpreterTool, z
+let agentsSDKLoaded = false
+
+const loadAgentsSDK = async () => {
+  if (agentsSDKLoaded) return
+  try {
+    console.log('⏳ Загрузка Agents SDK...')
+    const agentsModule = require('@openai/agents')
+    Agent = agentsModule.Agent
+    Runner = agentsModule.Runner
+    codeInterpreterTool = agentsModule.codeInterpreterTool
+    z = require('zod')
+    agentsSDKLoaded = true
+    console.log('✅ Agents SDK загружен успешно')
+  } catch (error) {
+    console.error('❌ Ошибка загрузки Agents SDK:', error)
+    throw error
+  }
+}
 
 app.set('etag', false)
 
@@ -115,7 +132,7 @@ const openaiClient = new OpenAI({
   maxRetries: Number(process.env.OPENAI_MAX_RETRIES || 2),
 })
 
-const analysisRunner = new Runner({})
+let analysisRunner = null
 
 // Инициализация БД (Postgres/SQLite) и создание схемы
 const db = createDb()
@@ -506,15 +523,29 @@ const runningFsSessions = new Set()
 
 // Code Interpreter без предустановленных файлов
 // Файлы будут добавляться динамически
-const codeInterpreter = codeInterpreterTool({
-  container: { type: 'auto' }
-})
+// Функция для получения codeInterpreter (ленивая загрузка)
+const getCodeInterpreter = () => {
+  if (!codeInterpreterTool) {
+    throw new Error('Agents SDK не загружен. Вызовите loadAgentsSDK() сначала.')
+  }
+  return codeInterpreterTool({
+    container: { type: 'auto' }
+  })
+}
 
-const InvestmentAgentSchema = z.object({
-  amount: z.number().nullable().optional(),
-  term_months: z.number().nullable().optional(),
-  completed: z.boolean().nullable().optional()
-})
+// Схемы будут созданы после загрузки SDK
+let InvestmentAgentSchema = null
+
+const initSchemas = () => {
+  if (!z) {
+    throw new Error('z не загружен. Вызовите loadAgentsSDK() сначала.')
+  }
+  InvestmentAgentSchema = z.object({
+    amount: z.number().nullable().optional(),
+    term_months: z.number().nullable().optional(),
+    completed: z.boolean().nullable().optional()
+  })
+}
 
 // Financial Analyst Agent для создания отчета
 // УПРОЩЕННЫЕ ИНСТРУКЦИИ: теперь агент получает уже очищенные JSON данные с операциями по кредиту
@@ -619,6 +650,9 @@ const defaultUserPrompt = `${financialAnalystInstructions}
 Проанализируй прикреплённые JSON данные с операциями по кредиту из банковских выписок и подготовь отчёт строго по указанной выше инструкции.`
 
 const createFinancialAnalystAgent = (fileIds = []) => {
+  if (!Agent || !codeInterpreterTool) {
+    throw new Error('Agents SDK не загружен. Вызовите loadAgentsSDK() сначала.')
+  }
   const toolConfig = {
     container: { type: 'auto' },
   }
@@ -971,6 +1005,11 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
 
     ;(async () => {
       try {
+        // Убеждаемся, что SDK загружен
+        await loadAgentsSDK()
+        if (!analysisRunner) {
+          analysisRunner = new Runner({})
+        }
         const runResult = await analysisRunner.run(analystAgent, agentInput)
 
         const rawNewItems = Array.isArray(runResult.newItems)
@@ -1345,6 +1384,18 @@ const server = app.listen(port, '0.0.0.0', () => {
   console.log(`📡 Health check: http://0.0.0.0:${port}/health`)
   console.log(`🏥 Ping: http://0.0.0.0:${port}/ping`)
   console.log(`🚀 Backend iKapitalist готов принимать запросы`)
+  
+  // Загружаем Agents SDK асинхронно после запуска сервера
+  // Это не блокирует health check
+  loadAgentsSDK()
+    .then(() => {
+      initSchemas()
+      analysisRunner = new Runner({})
+      console.log('✅ Agents SDK инициализирован, анализ готов к работе')
+    })
+    .catch((error) => {
+      console.error('⚠️ Ошибка инициализации Agents SDK (будет загружен при первом запросе):', error.message)
+    })
 })
 
 // Обработка graceful shutdown для Render.com и других платформ
