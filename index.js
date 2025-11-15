@@ -86,6 +86,20 @@ app.use((req, res, next) => {
   next()
 })
 
+// Health check endpoint для Render.com и других платформ
+app.get('/health', (req, res) => {
+  res.status(200).json({ 
+    status: 'ok', 
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime()
+  })
+})
+
+// Простой ping endpoint
+app.get('/ping', (req, res) => {
+  res.status(200).send('pong')
+})
+
 const frontendDistPath = path.join(__dirname, 'Frontend', 'dist')
 
 // В production отдаем статические файлы после сборки фронтенда
@@ -1322,8 +1336,12 @@ if (process.env.NODE_ENV === 'production') {
 
 const port = process.env.PORT || 3001
 
-const server = app.listen(port, () => {
+// Запускаем сервер сразу, не дожидаясь инициализации БД
+// Это важно для Render.com, чтобы health check работал быстро
+const server = app.listen(port, '0.0.0.0', () => {
   console.log(`🚀 Backend iKapitalist запущен на порту ${port}`)
+  console.log(`📡 Health check доступен на http://0.0.0.0:${port}/health`)
+  console.log(`🏥 Ping endpoint доступен на http://0.0.0.0:${port}/ping`)
 })
 
 // Обработка graceful shutdown для Render.com и других платформ
