@@ -22,6 +22,7 @@ services:
     # startCommand: npm start
     region: oregon
     plan: starter
+    healthCheckPath: /health
     envVars:
       # Обязательные переменные (нужно установить вручную в панели Render)
       - key: OPENAI_API_KEY
