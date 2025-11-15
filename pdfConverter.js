@@ -206,28 +206,36 @@ async function convertPdfToJsonViaPython(pdfBuffer, filename, customPdfServicePa
               // Найден JSON блок, извлекаем его
               let extractedJson = stdoutTrimmed.substring(jsonStartIndex)
               
-              // Теперь нужно найти конец JSON - ищем последнюю закрывающую скобку
-              // Для массива ищем последнюю ]
-              // Для объекта ищем последнюю }
+              // Находим конец JSON, пробуя парсить с конца строки
+              // Уменьшаем длину строки, пока не получим валидный JSON
               let jsonEndIndex = extractedJson.length
+              let foundValidJson = false
               
-              // Если это массив, ищем последнюю ]
-              if (extractedJson.startsWith('[')) {
-                const lastBracketIndex = extractedJson.lastIndexOf(']')
-                if (lastBracketIndex > 0) {
-                  jsonEndIndex = lastBracketIndex + 1
-                }
-              } 
-              // Если это объект, ищем последнюю }
-              else if (extractedJson.startsWith('{')) {
-                const lastBraceIndex = extractedJson.lastIndexOf('}')
-                if (lastBraceIndex > 0) {
-                  jsonEndIndex = lastBraceIndex + 1
+              // Пробуем найти конец JSON, начиная с конца строки
+              for (let i = extractedJson.length; i > 0; i--) {
+                const testJson = extractedJson.substring(0, i).trim()
+                if (testJson.length === 0) continue
+                
+                try {
+                  // Пробуем распарсить - если успешно, значит это валидный JSON
+                  JSON.parse(testJson)
+                  jsonEndIndex = i
+                  foundValidJson = true
+                  break
+                } catch (e) {
+                  // Продолжаем искать
+                  continue
                 }
               }
               
-              jsonString = extractedJson.substring(0, jsonEndIndex)
-              console.log(`📝 Извлечен JSON из stdout (пропущено ${jsonStartIndex} символов до JSON, ${extractedJson.length - jsonEndIndex} символов после)`)
+              if (foundValidJson) {
+                jsonString = extractedJson.substring(0, jsonEndIndex).trim()
+                console.log(`📝 Извлечен JSON из stdout (пропущено ${jsonStartIndex} символов до JSON, ${extractedJson.length - jsonEndIndex} символов после)`)
+              } else {
+                // Если не нашли валидный JSON, используем весь блок
+                jsonString = extractedJson
+                console.log(`⚠️ Не удалось найти конец JSON, используем весь блок после позиции ${jsonStartIndex}`)
+              }
             }
 
             // Парсим JSON
