@@ -609,6 +609,7 @@ const financialAnalystInstructions = `Ты финансовый аналитик
    Примеры операций, которые ЯВЛЯЮТСЯ выручкой:
    - "Оплата за товары", "Оплата за услуги", "Оплата по договору поставки"
    - "Оплата счета", "Оплата за выполненные работы"
+   - "Услуги"
    - Любые операции, где в назначении платежа упоминается продажа товаров/услуг
    
    Примеры операций, которые НЕ ЯВЛЯЮТСЯ выручкой:
@@ -681,9 +682,7 @@ const financialAnalystInstructions = `Ты финансовый аналитик
 - Твоя задача - проанализировать "Назначение платежа" и определить, является ли операция выручкой
 - Используй Code Interpreter для анализа JSON данных
 - Все суммы указывай в KZT с разделителями тысяч
-- Будь точным с датами и периодами
-- Выдели ключевые моменты жирным шрифтом
-- Используй эмодзи для визуальной структуры`
+- Будь точным с датами и периодами`
 
 const defaultUserPrompt = `${financialAnalystInstructions}
 
@@ -803,6 +802,9 @@ const buildPromptFromMetadata = (metadata) => {
   return `Дополнительные данные от сотрудника:\n${entries.join('\n')}`
 }
 
+// Защита от дублирования запросов
+const activeAnalysisSessions = new Set()
+
 app.post('/api/analysis', upload.array('files'), async (req, res) => {
   const startedAt = new Date()
   const incomingSession = req.body?.sessionId
@@ -817,6 +819,20 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
     files: summariseFilesForLog(files),
     metadata,
   })
+
+  // Защита от дублирования: если для этой сессии уже идет анализ, возвращаем ошибку
+  if (activeAnalysisSessions.has(sessionId)) {
+    console.warn('⚠️ Попытка запустить анализ для сессии, которая уже обрабатывается:', sessionId)
+    return res.status(409).json({
+      ok: false,
+      code: 'ANALYSIS_IN_PROGRESS',
+      message: 'Анализ для этой сессии уже выполняется. Пожалуйста, подождите.',
+      sessionId,
+    })
+  }
+
+  // Помечаем сессию как активную
+  activeAnalysisSessions.add(sessionId)
 
   if (!files.length) {
     console.error('❌ Запрос без файлов, возвращаем 400')
@@ -1057,9 +1073,24 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
     }
 
     console.log('🤖 Запускаем финансового аналитика через Runner (async)', {
+      sessionId,
       fileIds: fileIds.length,
+      jsonAttachmentsCount: jsonAttachments.length,
+      totalTransactions: jsonAttachments.reduce((sum, att) => {
+        try {
+          const data = JSON.parse(att.json_data)
+          return sum + (data.transactions?.length || 0)
+        } catch {
+          return sum
+        }
+      }, 0),
       promptPreview: combinedPrompt.slice(0, 200),
     })
+    
+    // ВАЖНО: Проверяем, что мы отправляем только ОДИН запрос для всех выписок
+    if (jsonAttachments.length > 1) {
+      console.log(`✅ Все ${jsonAttachments.length} выписки объединены в один JSON и будут отправлены одним запросом`)
+    }
 
     ;(async () => {
       try {
@@ -1159,12 +1190,17 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
         } catch (dbError) {
           console.error('⚠️ Не удалось зафиксировать ошибку в БД (async)', dbError)
         }
+      } finally {
+        // Освобождаем сессию после завершения анализа
+        activeAnalysisSessions.delete(sessionId)
       }
     })().catch((unhandled) => {
       console.error('❌ Необработанная ошибка фонового анализа', {
         sessionId,
         error: unhandled?.message || unhandled,
       })
+      // Освобождаем сессию даже при необработанной ошибке
+      activeAnalysisSessions.delete(sessionId)
     })
 
     const progress = await getSessionProgress(sessionId)
@@ -1186,6 +1222,9 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
       error: error.message,
       stack: error.stack,
     })
+
+    // Освобождаем сессию при ошибке
+    activeAnalysisSessions.delete(sessionId)
 
     try {
       await upsertReport(sessionId, {
