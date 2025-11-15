@@ -192,7 +192,7 @@ async function convertPdfToJsonViaPython(pdfBuffer, filename, customPdfServicePa
               return
             }
 
-            // Python скрипт может выводить логи в stdout перед JSON
+            // Python скрипт может выводить логи в stdout перед и после JSON
             // Ищем JSON блок в stdout (обычно это последний блок, начинающийся с [ или {)
             let jsonString = stdoutTrimmed
             
@@ -204,8 +204,30 @@ async function convertPdfToJsonViaPython(pdfBuffer, filename, customPdfServicePa
             
             if (jsonStartIndex > 0) {
               // Найден JSON блок, извлекаем его
-              jsonString = stdoutTrimmed.substring(jsonStartIndex)
-              console.log(`📝 Извлечен JSON из stdout (пропущено ${jsonStartIndex} символов логов)`)
+              let extractedJson = stdoutTrimmed.substring(jsonStartIndex)
+              
+              // Теперь нужно найти конец JSON - ищем последнюю закрывающую скобку
+              // Для массива ищем последнюю ]
+              // Для объекта ищем последнюю }
+              let jsonEndIndex = extractedJson.length
+              
+              // Если это массив, ищем последнюю ]
+              if (extractedJson.startsWith('[')) {
+                const lastBracketIndex = extractedJson.lastIndexOf(']')
+                if (lastBracketIndex > 0) {
+                  jsonEndIndex = lastBracketIndex + 1
+                }
+              } 
+              // Если это объект, ищем последнюю }
+              else if (extractedJson.startsWith('{')) {
+                const lastBraceIndex = extractedJson.lastIndexOf('}')
+                if (lastBraceIndex > 0) {
+                  jsonEndIndex = lastBraceIndex + 1
+                }
+              }
+              
+              jsonString = extractedJson.substring(0, jsonEndIndex)
+              console.log(`📝 Извлечен JSON из stdout (пропущено ${jsonStartIndex} символов до JSON, ${extractedJson.length - jsonEndIndex} символов после)`)
             }
 
             // Парсим JSON
