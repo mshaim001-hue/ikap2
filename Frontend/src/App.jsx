@@ -154,7 +154,7 @@ const UploadPanel = ({
           <label htmlFor="comment">Комментарий для аналитика</label>
           <textarea
             id="comment"
-            placeholder="Укажите важные детали: приоритетные банки, периоды, контекст..."
+            placeholder="Укажите важные детали: Наименование компании, БИН/ИИН, имя"
             value={comment}
             onChange={(event) => onCommentChange(event.target.value)}
             rows={4}
@@ -429,6 +429,7 @@ function App() {
   const [files, setFiles] = useState([])
   const [comment, setComment] = useState('')
   const [activeSessionId, setActiveSessionId] = useState(null)
+  const [isDetailsModalOpen, setIsDetailsModalOpen] = useState(false)
   const [submitError, setSubmitError] = useState('')
   const [searchTerm, setSearchTerm] = useState('')
   const [listError, setListError] = useState('')
@@ -525,6 +526,7 @@ function App() {
       if (activeSessionId === sessionId) {
         setActiveSessionId(null)
         queryClient.removeQueries({ queryKey: ['report', sessionId] })
+        setIsDetailsModalOpen(false)
       }
       queryClient.invalidateQueries({ queryKey: ['reports'] })
       setPendingDelete(null)
@@ -671,6 +673,7 @@ function App() {
             onRefresh={handleRefreshReports}
             onSelect={(sessionId) => {
               setActiveSessionId(sessionId)
+              setIsDetailsModalOpen(true)
             }}
             onDelete={handleDeleteReport}
             activeSessionId={activeSessionId}
@@ -680,20 +683,53 @@ function App() {
             deletingSessionId={pendingDelete}
             error={listError}
           />
-          <ReportDetails
-            report={reportQuery.data}
-            isLoading={reportQuery.isLoading}
-            isFetching={reportQuery.isFetching}
-            error={reportQuery.error}
-            onRefresh={() => {
-              if (activeSessionId) {
-                reportQuery.refetch()
-              }
-            }}
-            hasSelection={Boolean(activeSessionId)}
-          />
         </div>
       </main>
+
+      {isDetailsModalOpen && (
+        <div
+          className="modal-backdrop"
+          onClick={() => {
+            setIsDetailsModalOpen(false)
+          }}
+        >
+          <div
+            className="modal"
+            onClick={(event) => {
+              event.stopPropagation()
+            }}
+          >
+            <header className="modal-header">
+              <div>
+                <h2>Детали анализа</h2>
+                <p>Подробности выбранной заявки и итоговый отчёт агента</p>
+              </div>
+              <button
+                type="button"
+                className="icon-button"
+                onClick={() => setIsDetailsModalOpen(false)}
+                aria-label="Закрыть детали анализа"
+              >
+                <X size={18} />
+              </button>
+            </header>
+            <div className="modal-body">
+              <ReportDetails
+                report={reportQuery.data}
+                isLoading={reportQuery.isLoading}
+                isFetching={reportQuery.isFetching}
+                error={reportQuery.error}
+                onRefresh={() => {
+                  if (activeSessionId) {
+                    reportQuery.refetch()
+                  }
+                }}
+                hasSelection={Boolean(activeSessionId)}
+              />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
