@@ -306,6 +306,32 @@
   cursor: not-allowed;
 }
 
+.secondary-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 12px;
+  border: 1px solid rgba(99, 102, 241, 0.45);
+  background: rgba(99, 102, 241, 0.08);
+  color: #4338ca;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.secondary-button:hover {
+  background: rgba(99, 102, 241, 0.16);
+  border-color: rgba(79, 70, 229, 0.65);
+}
+
+.secondary-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .form-alert {
   display: flex;
   align-items: center;
@@ -646,6 +672,140 @@
   font-size: 14px;
   color: #334155;
   white-space: pre-wrap;
+}
+
+.auto-revenue-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.auto-revenue-hint {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+.auto-revenue-panel {
+  border: 1px dashed rgba(99, 102, 241, 0.4);
+  border-radius: 16px;
+  background: rgba(248, 250, 252, 0.8);
+  padding: 12px;
+}
+
+.auto-revenue-table-wrapper {
+  max-height: 320px;
+  overflow: auto;
+}
+
+.auto-revenue-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.auto-revenue-table th {
+  text-align: left;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #475569;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.4);
+  background: rgba(226, 232, 240, 0.5);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.auto-revenue-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.25);
+  vertical-align: top;
+  color: #0f172a;
+}
+
+.auto-revenue-table tr:last-child td {
+  border-bottom: none;
+}
+
+.auto-revenue-purpose strong {
+  display: block;
+  color: #0f172a;
+  margin-bottom: 4px;
+}
+
+.auto-revenue-purpose span {
+  display: block;
+  font-size: 12px;
+  color: #64748b;
+}
+
+.auto-revenue-source span {
+  display: block;
+  font-weight: 600;
+  color: #4338ca;
+}
+
+.auto-revenue-source small {
+  display: block;
+  font-size: 11px;
+  color: #94a3b8;
+  margin-top: 4px;
+}
+
+.excel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.excel-hint {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+.excel-panel {
+  border: 1px dashed rgba(14, 165, 233, 0.5);
+  border-radius: 16px;
+  background: rgba(240, 249, 255, 0.8);
+  padding: 12px;
+}
+
+.excel-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.excel-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(14, 165, 233, 0.2);
+  background: #f8fbff;
+}
+
+.excel-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: #0f172a;
+}
+
+.excel-meta span {
+  font-size: 12px;
+  color: #64748b;
 }
 
 .details-columns {

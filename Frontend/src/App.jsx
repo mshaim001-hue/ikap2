@@ -296,6 +296,74 @@ const ReportsList = ({
 )
 
 const ReportDetails = ({ report, isLoading, isFetching, error, onRefresh, hasSelection }) => {
+  const [showAutoRevenuePreview, setShowAutoRevenuePreview] = useState(false)
+  const [showConvertedExcels, setShowConvertedExcels] = useState(false)
+
+  const structuredReport = useMemo(() => {
+    if (!report?.report_structured) {
+      return null
+    }
+    if (typeof report.report_structured === 'object') {
+      return report.report_structured
+    }
+    try {
+      return JSON.parse(report.report_structured)
+    } catch {
+      return null
+    }
+  }, [report?.report_structured])
+
+  const autoRevenuePreview = structuredReport?.autoRevenuePreview || []
+  const convertedExcels = structuredReport?.convertedExcels || []
+
+  useEffect(() => {
+    setShowAutoRevenuePreview(false)
+    setShowConvertedExcels(false)
+  }, [report?.session_id])
+
+  const formatAutoRevenueDate = (value) => {
+    if (!value) return '—'
+    const date = new Date(value)
+    if (!Number.isNaN(date.getTime())) {
+      return date.toLocaleDateString('ru-RU', {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+      })
+    }
+    return value
+  }
+
+  const hasAutoRevenuePreview = autoRevenuePreview.length > 0
+  const hasConvertedExcels = convertedExcels.length > 0
+
+  const handleDownloadExcel = (file) => {
+    if (!file?.base64 || typeof window === 'undefined') return
+    try {
+      const binaryString = window.atob(file.base64)
+      const len = binaryString.length
+      const bytes = new Uint8Array(len)
+      for (let i = 0; i < len; i += 1) {
+        bytes[i] = binaryString.charCodeAt(i)
+      }
+      const blob = new Blob([bytes], {
+        type:
+          file.mime ||
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      })
+      const url = window.URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = file.name || 'converted.xlsx'
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      window.URL.revokeObjectURL(url)
+    } catch (downloadError) {
+      console.error('❌ Не удалось скачать Excel файл', downloadError)
+    }
+  }
+
   const renderContent = () => {
     if (!hasSelection) {
       return (
@@ -389,6 +457,105 @@ const ReportDetails = ({ report, isLoading, isFetching, error, onRefresh, hasSel
                 </div>
               ))}
             </article>
+          </div>
+        )}
+
+        {hasAutoRevenuePreview && (
+          <div className="details-report">
+            <div className="auto-revenue-header">
+              <div>
+                <h3>AutoRevenue (тест)</h3>
+                <p className="auto-revenue-hint">Автоматически классифицированные операции (для отладки)</p>
+              </div>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => setShowAutoRevenuePreview((prev) => !prev)}
+              >
+                {showAutoRevenuePreview ? 'Скрыть список' : 'Показать список'} ({autoRevenuePreview.length})
+              </button>
+            </div>
+            {showAutoRevenuePreview && (
+              <div className="auto-revenue-panel">
+                <div className="auto-revenue-table-wrapper">
+                  <table className="auto-revenue-table">
+                    <thead>
+                      <tr>
+                        <th>Дата</th>
+                        <th>Сумма</th>
+                        <th>Назначение</th>
+                        <th>Источник</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {autoRevenuePreview.map((item) => (
+                        <tr key={item.id || `${item.date}-${item.amountRaw}`}>
+                          <td>{formatAutoRevenueDate(item.date)}</td>
+                          <td>{item.amountFormatted || item.amountRaw || '—'}</td>
+                          <td>
+                            <div className="auto-revenue-purpose">
+                              <strong>{item.purpose || '—'}</strong>
+                              {(item.sender || item.correspondent) && (
+                                <span>
+                                  {item.sender || item.correspondent}
+                                </span>
+                              )}
+                            </div>
+                          </td>
+                          <td>
+                            <div className="auto-revenue-source">
+                              <span>{item.source === 'heuristic' ? 'Авто' : item.source || '—'}</span>
+                              {item.reason && <small>{item.reason}</small>}
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {hasConvertedExcels && (
+          <div className="details-report">
+            <div className="excel-header">
+              <div>
+                <h3>Excel после конвертации (тест)</h3>
+                <p className="excel-hint">
+                  Исходные XLSX из Adobe, сохраняем для проверки корректности парсинга
+                </p>
+              </div>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => setShowConvertedExcels((prev) => !prev)}
+              >
+                {showConvertedExcels ? 'Скрыть файлы' : 'Показать файлы'} ({convertedExcels.length})
+              </button>
+            </div>
+            {showConvertedExcels && (
+              <div className="excel-panel">
+                <ul className="excel-list">
+                  {convertedExcels.map((file, index) => (
+                    <li key={file.name || index} className="excel-item">
+                      <div className="excel-meta">
+                        <strong>{file.name || `converted_${index + 1}.xlsx`}</strong>
+                        <span>{formatFileSize(file.size)}</span>
+                      </div>
+                      <button
+                        type="button"
+                        className="secondary-button"
+                        onClick={() => handleDownloadExcel(file)}
+                      >
+                        Скачать
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </div>
         )}
 

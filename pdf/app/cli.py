@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import base64
 
 import pandas as pd
 
@@ -112,11 +113,22 @@ def main() -> None:
                     print(f"[CLI] Первые 3 строки DataFrame:", file=sys.stderr, flush=True)
                     print(frame.head(3).to_string(), file=sys.stderr, flush=True)
 
+            excel_bytes, excel_filename = processor.get_last_excel()
+            excel_attachment = None
+            if excel_bytes:
+                excel_attachment = {
+                    "name": excel_filename or f"{path.stem}.xlsx",
+                    "size": len(excel_bytes),
+                    "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    "base64": base64.b64encode(excel_bytes).decode("utf-8"),
+                }
+
             documents.append(
                 {
                     "source_file": path.name,
                     "metadata": extraction.metadata,
                     "transactions": transactions,
+                    "excel_file": excel_attachment,
                 }
             )
         except Exception as e:

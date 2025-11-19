@@ -179,6 +179,7 @@ async function initSchema() {
         openai_response_id TEXT,
         openai_status TEXT,
         report_text TEXT,
+        report_structured TEXT,
         status TEXT DEFAULT 'generating',
         files_count INTEGER DEFAULT 0,
         files_data TEXT,
@@ -222,6 +223,7 @@ async function initSchema() {
       ALTER TABLE reports ADD COLUMN IF NOT EXISTS comment TEXT;
       ALTER TABLE reports ADD COLUMN IF NOT EXISTS openai_response_id TEXT;
       ALTER TABLE reports ADD COLUMN IF NOT EXISTS openai_status TEXT;
+      ALTER TABLE reports ADD COLUMN IF NOT EXISTS report_structured TEXT;
     `)
   } else {
     db.exec(`
@@ -239,6 +241,7 @@ async function initSchema() {
         openai_response_id TEXT,
         openai_status TEXT,
         report_text TEXT,
+        report_structured TEXT,
         status TEXT DEFAULT 'generating',
         files_count INTEGER DEFAULT 0,
         files_data TEXT,
@@ -271,27 +274,19 @@ async function initSchema() {
       CREATE INDEX IF NOT EXISTS idx_files_session ON files(session_id);
       CREATE INDEX IF NOT EXISTS idx_reports_created ON reports(created_at);
     `)
-    try {
-      db.exec(`ALTER TABLE reports ADD COLUMN comment TEXT`)
-    } catch (error) {
-      if (!/duplicate column name/i.test(error.message || '')) {
-        console.warn('⚠️ Не удалось добавить колонку comment в таблицу reports (SQLite)', error)
+    const addColumnSafe = (sql, columnName) => {
+      try {
+        db.exec(sql)
+      } catch (error) {
+        if (!/duplicate column name/i.test(error.message || '')) {
+          console.warn(`⚠️ Не удалось добавить колонку ${columnName} в таблицу reports (SQLite)`, error)
+        }
       }
     }
-    try {
-      db.exec(`ALTER TABLE reports ADD COLUMN openai_response_id TEXT`)
-    } catch (error) {
-      if (!/duplicate column name/i.test(error.message || '')) {
-        console.warn('⚠️ Не удалось добавить колонку openai_response_id в таблицу reports (SQLite)', error)
-      }
-    }
-    try {
-      db.exec(`ALTER TABLE reports ADD COLUMN openai_status TEXT`)
-    } catch (error) {
-      if (!/duplicate column name/i.test(error.message || '')) {
-        console.warn('⚠️ Не удалось добавить колонку openai_status в таблицу reports (SQLite)', error)
-      }
-    }
+    addColumnSafe(`ALTER TABLE reports ADD COLUMN comment TEXT`, 'comment')
+    addColumnSafe(`ALTER TABLE reports ADD COLUMN openai_response_id TEXT`, 'openai_response_id')
+    addColumnSafe(`ALTER TABLE reports ADD COLUMN openai_status TEXT`, 'openai_status')
+    addColumnSafe(`ALTER TABLE reports ADD COLUMN report_structured TEXT`, 'report_structured')
   }
   console.log('✅ Database initialized with all tables')
 }
@@ -481,6 +476,7 @@ const maybeUpdateReportFromOpenAI = async (reportRow) => {
     await upsertReport(reportRow.session_id, {
       status: reportStatus,
       reportText,
+      reportStructured: reportRow.report_structured,
       filesCount: reportRow.files_count,
       filesData: reportRow.files_data,
       completed: completionTimestamp,
@@ -492,7 +488,7 @@ const maybeUpdateReportFromOpenAI = async (reportRow) => {
     const db = getDb()
     const updatedRow = await db
       .prepare(
-        `SELECT session_id, status, company_bin, amount, term, purpose, name, email, phone, comment, created_at, completed_at, files_count, files_data, report_text, tax_report_text, tax_status, tax_missing_periods, fs_report_text, fs_status, fs_missing_periods, openai_response_id, openai_status
+        `SELECT session_id, status, company_bin, amount, term, purpose, name, email, phone, comment, created_at, completed_at, files_count, files_data, report_text, tax_report_text, tax_status, tax_missing_periods, fs_report_text, fs_status, fs_missing_periods, openai_response_id, openai_status, report_structured
          FROM reports
          WHERE session_id = ?`
       )
@@ -597,6 +593,7 @@ const transactionClassifierInstructions = `Ты финансовый анали�
    - Проверяй поле \`correspondent\` (корреспондент) — если это известный клиент или организация, это может быть выручка
    - Проверяй поле \`bin\` (БИН/ИИН) — если совпадает с получателем, это внутренний перевод
    - Если в назначении есть номера договоров, счетов-фактур, актов — это обычно выручка
+   - Всегда рассматривай формулировки наподобие "Продажи с Kaspi.kz" как выручку (это marketplace-выручка)
 6. Если формулировка явно указывает на продажу товаров/услуг — ставь true.
 7. Если текст нейтральный, но похож на оплату клиента (invoice, payment for contract, СФ, акт) — выбирай true.
 8. Если сомневаешься — анализируй контекст (корреспондент, БИН, наличие договоров/счетов), а не выбирай false по умолчанию.
@@ -627,6 +624,12 @@ const safeJsonParse = (value) => {
   } catch {
     return null
   }
+}
+
+const normalizeStructuredValue = (value) => {
+  if (!value) return null
+  if (typeof value === 'object') return value
+  return safeJsonParse(value)
 }
 
 const MONTH_NAMES_RU = [
@@ -674,6 +677,10 @@ const REVENUE_KEYWORDS = [
   'оплата прочих',
   'оплата услуг',
   'оплата работ',
+  'kaspi',
+  'kaspi.kz',
+  'продажи с kaspi',
+  'продажи с kaspi.kz',
 ]
 
 const NON_REVENUE_KEYWORDS = [
@@ -754,6 +761,21 @@ const extractSender = (transaction) =>
     ])
   )
 
+const extractCorrespondent = (transaction) =>
+  normalizeWhitespace(
+    getFieldValue(transaction, [
+      'Корреспондент',
+      'корреспондент',
+      'Correspondent',
+      'correspondent',
+      'Получатель',
+      'получатель',
+      'Beneficiary',
+      'beneficiary',
+      'counterparty',
+    ])
+  )
+
 const extractAmountRaw = (transaction) =>
   getFieldValue(transaction, [
     'Кредит',
@@ -767,11 +789,68 @@ const extractAmountRaw = (transaction) =>
 
 const sanitizeNumberString = (value) => {
   if (typeof value !== 'string') return ''
-  return value
+  let cleaned = value
     .replace(/\u00a0/g, '')
-    .replace(/[^0-9,.\-]/g, '')
-    .replace(',', '.')
+    .replace(/\u202f/g, '')
+    .replace(/\s+/g, '')
+    .replace(/['’`´]/g, '')
     .trim()
+  if (!cleaned) return ''
+
+  let negative = false
+  if (cleaned.startsWith('-')) {
+    negative = true
+    cleaned = cleaned.slice(1)
+  } else if (cleaned.startsWith('+')) {
+    cleaned = cleaned.slice(1)
+  }
+
+  let numeric = cleaned.replace(/[^0-9,.\-]/g, '')
+  if (!numeric) return ''
+
+  if (numeric.startsWith('-')) {
+    negative = true
+    numeric = numeric.slice(1)
+  }
+  numeric = numeric.replace(/-/g, '')
+
+  const hasComma = numeric.includes(',')
+  const hasDot = numeric.includes('.')
+
+  if (hasComma && hasDot) {
+    if (numeric.lastIndexOf(',') > numeric.lastIndexOf('.')) {
+      numeric = numeric.replace(/\./g, '').replace(',', '.')
+    } else {
+      numeric = numeric.replace(/,/g, '')
+    }
+    return (negative ? '-' : '') + numeric
+  }
+
+  const separatorIndex = Math.max(numeric.lastIndexOf(','), numeric.lastIndexOf('.'))
+  if (separatorIndex === -1) {
+    return (negative ? '-' : '') + numeric
+  }
+
+  const separator = numeric[separatorIndex]
+  const fractionalLength = numeric.length - separatorIndex - 1
+  const separatorsCount = (numeric.match(new RegExp(`\\${separator}`, 'g')) || []).length
+
+  const treatAsDecimal =
+    fractionalLength > 0 &&
+    fractionalLength <= 2 &&
+    (separatorsCount === 1 || separator === ',')
+
+  if (treatAsDecimal) {
+    const integerPart = numeric.slice(0, separatorIndex).replace(/[^0-9]/g, '') || '0'
+    const fractionalPart = numeric.slice(separatorIndex + 1).replace(/[^0-9]/g, '')
+    if (!fractionalPart) {
+      return (negative ? '-' : '') + integerPart
+    }
+    return `${negative ? '-' : ''}${integerPart}.${fractionalPart}`
+  }
+
+  const stripped = numeric.replace(new RegExp(`\\${separator}`, 'g'), '')
+  return (negative ? '-' : '') + stripped
 }
 
 const parseAmountNumber = (value) => {
@@ -842,19 +921,21 @@ const tryParseDate = (value) => {
   return null
 }
 
+const TRANSACTION_DATE_KEYS = [
+  'Дата',
+  'дата',
+  'Date',
+  'date',
+  'Дата операции',
+  'дата операции',
+  'Дата платежа',
+  'дата платежа',
+  'Value Date',
+  'value date',
+]
+
 const extractTransactionDate = (transaction) => {
-  const value = getFieldValue(transaction, [
-    'Дата',
-    'дата',
-    'Date',
-    'date',
-    'Дата операции',
-    'дата операции',
-    'Дата платежа',
-    'дата платежа',
-    'Value Date',
-    'value date',
-  ])
+  const value = getFieldValue(transaction, TRANSACTION_DATE_KEYS)
   return tryParseDate(value)
 }
 
@@ -1026,10 +1107,45 @@ const computeTrailing12Months = (transactions = []) => {
   return { total, referenceDate }
 }
 
+const buildTransactionsPreview = (transactions = [], { limit = 50 } = {}) => {
+  if (!Array.isArray(transactions) || transactions.length === 0) {
+    return []
+  }
+
+  return transactions.slice(0, limit).map((transaction) => {
+    const amountRaw = extractAmountRaw(transaction)
+    const amountValue = parseAmountNumber(amountRaw)
+    const parsedDate = extractTransactionDate(transaction)
+    const originalDate = getFieldValue(transaction, TRANSACTION_DATE_KEYS) || null
+
+    return {
+      id:
+        transaction._ikap_tx_id ||
+        transaction.transaction_id ||
+        transaction.id ||
+        transaction.ID ||
+        null,
+      amountRaw: amountRaw || null,
+      amountValue: Number.isFinite(amountValue) && amountValue !== 0 ? amountValue : null,
+      amountFormatted:
+        Number.isFinite(amountValue) && amountValue !== 0 ? formatCurrencyKzt(amountValue) : null,
+      date: parsedDate ? parsedDate.toISOString() : originalDate,
+      purpose: extractPurpose(transaction) || null,
+      sender: extractSender(transaction) || null,
+      correspondent: extractCorrespondent(transaction) || null,
+      source: transaction._ikap_classification_source || null,
+      reason: transaction._ikap_classification_reason || null,
+      possibleNonRevenue: Boolean(transaction._ikap_possible_non_revenue),
+    }
+  })
+}
+
 const buildStructuredSummary = ({
   revenueTransactions,
   nonRevenueTransactions,
   stats,
+  autoRevenuePreview,
+  convertedExcels,
 }) => {
   const revenueSummary = aggregateByYearMonth(revenueTransactions)
   const nonRevenueSummary = aggregateByYearMonth(nonRevenueTransactions)
@@ -1067,6 +1183,8 @@ const buildStructuredSummary = ({
         : null,
     },
     stats,
+    autoRevenuePreview: Array.isArray(autoRevenuePreview) ? autoRevenuePreview : [],
+    convertedExcels: Array.isArray(convertedExcels) ? convertedExcels : [],
   }
 }
 
@@ -1203,6 +1321,22 @@ const formatReportAsText = (reportData) => {
   return lines.join('\n').trim()
 }
 
+const ensureHumanReadableReportText = (row) => {
+  if (!row) return row
+  const structured = normalizeStructuredValue(row.report_structured)
+  if (structured && typeof structured === 'object') {
+    row.report_text = formatReportAsText(structured)
+    return row
+  }
+  if (row.report_text) {
+    const parsed = normalizeStructuredValue(row.report_text)
+    if (parsed && typeof parsed === 'object' && (parsed.generatedAt || parsed.totals || parsed.revenue)) {
+      row.report_text = formatReportAsText(parsed)
+    }
+  }
+  return row
+}
+
 const normalizeMetadata = (raw) => {
   if (!raw) return null
   if (typeof raw === 'object') return raw
@@ -1244,15 +1378,26 @@ const extractOutputText = (response) => {
 }
 
 const upsertReport = async (sessionId, payload) => {
-  const { status, reportText, filesCount, filesData, completed, comment, openaiResponseId, openaiStatus } = payload
+  const {
+    status,
+    reportText,
+    reportStructured,
+    filesCount,
+    filesData,
+    completed,
+    comment,
+    openaiResponseId,
+    openaiStatus,
+  } = payload
   try {
     const db = getDb()
     const stmt = db.prepare(`
-      INSERT INTO reports (session_id, status, report_text, files_count, files_data, completed_at, comment, openai_response_id, openai_status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO reports (session_id, status, report_text, report_structured, files_count, files_data, completed_at, comment, openai_response_id, openai_status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(session_id) DO UPDATE SET
         status = excluded.status,
         report_text = excluded.report_text,
+        report_structured = COALESCE(excluded.report_structured, reports.report_structured),
         files_count = excluded.files_count,
         files_data = excluded.files_data,
         completed_at = excluded.completed_at,
@@ -1264,6 +1409,7 @@ const upsertReport = async (sessionId, payload) => {
       sessionId,
       status,
       reportText || null,
+      reportStructured || null,
       typeof filesCount === 'number' ? filesCount : null,
       filesData || null,
       completed || null,
@@ -1337,6 +1483,7 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
     const pdfFiles = []
     const otherFiles = []
     let extractedTransactions = []
+    let convertedExcels = []
 
     // Разделяем файлы на PDF и остальные
     for (const file of files) {
@@ -1374,6 +1521,7 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
         // Объединяем все транзакции из всех файлов
         const allTransactions = []
         const allMetadata = []
+        const collectedExcels = []
         
         for (const result of jsonResults) {
           if (result.error) {
@@ -1395,9 +1543,29 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
               ...result.metadata
             })
           }
+
+          if (result.excel_file && typeof result.excel_file === 'object' && result.excel_file.base64) {
+            try {
+              const excelBuffer = Buffer.from(result.excel_file.base64, 'base64')
+              collectedExcels.push({
+                name:
+                  result.excel_file.name ||
+                  (result.source_file ? result.source_file.replace(/\.pdf$/i, '.xlsx') : 'converted.xlsx'),
+                size: result.excel_file.size || excelBuffer.length,
+                mime:
+                  result.excel_file.mime ||
+                  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                source: result.source_file,
+                base64: result.excel_file.base64,
+              })
+            } catch (excelError) {
+              console.error('⚠️ Не удалось обработать Excel файл из результата конвертации', excelError)
+            }
+          }
         }
         
         console.log(`📊 Итого собрано транзакций: ${allTransactions.length}`)
+        convertedExcels = collectedExcels
 
         const transactionsWithInternalIds = attachInternalTransactionIds(allTransactions, sessionId)
         extractedTransactions = transactionsWithInternalIds
@@ -1546,6 +1714,7 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
       await upsertReport(sessionId, {
         status: 'generating',
         reportText: null,
+        reportStructured: null,
         filesCount: files.length,
         filesData: filesDataJson,
         completed: null,
@@ -1714,6 +1883,8 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
             agentDecisions: decisionsMap.size,
             unresolved: Math.max(0, needsReview.length - decisionsMap.size),
           },
+          autoRevenuePreview: buildTransactionsPreview(obviousRevenue, { limit: 100 }),
+          convertedExcels,
         })
 
         const completedAt = new Date().toISOString()
@@ -1725,6 +1896,7 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
         await upsertReport(sessionId, {
           status: 'completed',
           reportText: formattedReportText,
+          reportStructured: finalReportPayload,
           filesCount: files.length,
           filesData: filesDataJson,
           completed: completedAt,
@@ -1750,6 +1922,7 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
           await upsertReport(sessionId, {
             status: 'failed',
             reportText: streamError.message,
+            reportStructured: null,
             filesCount: files.length,
             filesData: filesDataJson,
             completed: new Date().toISOString(),
@@ -1800,6 +1973,7 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
       await upsertReport(sessionId, {
         status: 'failed',
         reportText: error.message,
+        reportStructured: null,
         filesCount: files.length,
         filesData: JSON.stringify(summariseFilesForLog(files)),
         completed: new Date().toISOString(),
@@ -1824,7 +1998,7 @@ app.get('/api/reports', async (_req, res) => {
     const db = getDb()
     const rows = await db
       .prepare(
-        `SELECT session_id, status, company_bin, amount, term, purpose, name, email, phone, comment, created_at, completed_at, files_count, files_data, report_text, openai_response_id, openai_status 
+        `SELECT session_id, status, company_bin, amount, term, purpose, name, email, phone, comment, created_at, completed_at, files_count, files_data, report_text, openai_response_id, openai_status, report_structured 
          FROM reports 
          ORDER BY created_at DESC 
          LIMIT 100`
@@ -1835,19 +2009,7 @@ app.get('/api/reports', async (_req, res) => {
     const refreshed = await Promise.all(list.map((row) => maybeUpdateReportFromOpenAI(row)))
     
     // Форматируем report_text для каждого отчета, если это JSON
-    const formatted = refreshed.map((row) => {
-      if (row.report_text) {
-        try {
-          const parsed = JSON.parse(row.report_text)
-          if (parsed && typeof parsed === 'object' && (parsed.generatedAt || parsed.totals || parsed.revenue)) {
-            return { ...row, report_text: formatReportAsText(parsed) }
-          }
-        } catch {
-          // Если не JSON, оставляем как есть
-        }
-      }
-      return row
-    })
+    const formatted = refreshed.map((row) => ensureHumanReadableReportText({ ...row }))
     
     res.json(formatted)
   } catch (error) {
@@ -1862,7 +2024,7 @@ app.get('/api/reports/:sessionId', async (req, res) => {
     const db = getDb()
     const row = await db
       .prepare(
-        `SELECT session_id, status, company_bin, amount, term, purpose, name, email, phone, comment, created_at, completed_at, files_count, files_data, report_text, tax_report_text, tax_status, tax_missing_periods, fs_report_text, fs_status, fs_missing_periods, openai_response_id, openai_status
+        `SELECT session_id, status, company_bin, amount, term, purpose, name, email, phone, comment, created_at, completed_at, files_count, files_data, report_text, tax_report_text, tax_status, tax_missing_periods, fs_report_text, fs_status, fs_missing_periods, openai_response_id, openai_status, report_structured
          FROM reports 
          WHERE session_id = ?`
       )
@@ -1875,21 +2037,7 @@ app.get('/api/reports/:sessionId', async (req, res) => {
     const syncedRow = await maybeUpdateReportFromOpenAI(row)
     const finalRow = syncedRow || row
     
-    // Форматируем report_text, если это JSON
-    if (finalRow.report_text) {
-      try {
-        // Пробуем распарсить как JSON
-        const parsed = JSON.parse(finalRow.report_text)
-        // Если это объект с полями отчета, форматируем его
-        if (parsed && typeof parsed === 'object' && (parsed.generatedAt || parsed.totals || parsed.revenue)) {
-          finalRow.report_text = formatReportAsText(parsed)
-        }
-      } catch {
-        // Если не JSON, оставляем как есть
-      }
-    }
-    
-    res.json(finalRow)
+    res.json(ensureHumanReadableReportText(finalRow))
   } catch (error) {
     console.error('❌ Ошибка получения отчёта', error)
     res.status(500).json({ ok: false, message: 'Не удалось получить отчёт.' })
