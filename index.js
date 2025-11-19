@@ -40,7 +40,7 @@ const upload = multer({
 
 // Agents SDK будет загружен асинхронно после запуска сервера
 // Это ускоряет запуск и позволяет health check отвечать сразу
-let Agent, Runner, codeInterpreterTool, z
+let Agent, Runner, z
 let agentsSDKLoaded = false
 
 const loadAgentsSDK = async () => {
@@ -50,7 +50,6 @@ const loadAgentsSDK = async () => {
     const agentsModule = require('@openai/agents')
     Agent = agentsModule.Agent
     Runner = agentsModule.Runner
-    codeInterpreterTool = agentsModule.codeInterpreterTool
     z = require('zod')
     agentsSDKLoaded = true
     console.log('✅ Agents SDK загружен успешно')
@@ -561,18 +560,6 @@ const runningStatementsSessions = new Set()
 const runningTaxSessions = new Set()
 const runningFsSessions = new Set()
 
-// Code Interpreter без предустановленных файлов
-// Файлы будут добавляться динамически
-// Функция для получения codeInterpreter (ленивая загрузка)
-const getCodeInterpreter = () => {
-  if (!codeInterpreterTool) {
-    throw new Error('Agents SDK не загружен. Вызовите loadAgentsSDK() сначала.')
-  }
-  return codeInterpreterTool({
-    container: { type: 'auto' }
-  })
-}
-
 // Схемы будут созданы после загрузки SDK
 let InvestmentAgentSchema = null
 
@@ -587,190 +574,460 @@ const initSchemas = () => {
   })
 }
 
-// Financial Analyst Agent для создания отчета
-// ВАЖНО: агент получает уже очищенные JSON-данные (только операции по кредиту) из одного или нескольких банков и периодов
-const financialAnalystInstructions = `Ты финансовый аналитик iKapitalist. Твоя ГЛАВНАЯ ЦЕЛЬ - определить чистую выручку от реализации товаров и услуг на основе уже очищенных данных банковских выписок.
+const transactionClassifierInstructions = `Ты финансовый аналитик iKapitalist. Твоя задача — классифицировать операции, по которым нет однозначного понимания, является ли поступление выручкой от реализации товаров/услуг или нет.
 
-📊 **РЕЗЮМЕ ЗАЯВКИ**
-- Компания: [БИН], название компании: [Название компании], период: [Период]
+Данные:
+- Ты получишь JSON-массив \`transactions_for_review\`.
+- Каждая операция имеет как минимум поля \`id\`, \`date\`, \`amount\`, \`purpose\`, иногда \`sender\`/\`comment\`.
 
-🎯 **ОСНОВНЫЕ НАПРАВЛЕНИЯ РАБОТЫ**
+Требования:
+1. Для каждой операции верни признак \`is_revenue\` (true/false) и короткое объяснение \`reason\`.
+2. Считай выручкой только платежи клиентов за товары/услуги или их прямые аналоги ("оплата", "реализация", "invoice", "services", "goods", "договор поставки" и т.п.).
+3. Не относись к выручке переводы между собственными счетами, возвраты, займы/кредиты, инвестиции, субсидии, пополнения, депозиты, дивиденды, зарплаты, налоги, штрафы, возврат оплаты клиенту и т.п.
+4. Если формулировка явно указывает на невыручку — ставь false.
+5. Если формулировка явно указывает на продажу товаров/услуг — ставь true.
+6. Если текст нейтральный, но похож на оплату клиента (invoice, payment for contract) — выбирай true.
+7. Если сомневаешься между внутренним переводом и оплатой клиента — выбирай false (консервативно) и поясни почему.
 
-ВАЖНО: Ты получаешь уже очищенные JSON данные из банковских выписок. Все операции уже отфильтрованы - остались только операции по КРЕДИТУ (поступления на счет).
+Формат ответа — строго JSON без текста:
+{
+  "transactions": [
+    { "id": "tx_1", "is_revenue": true, "reason": "оплата по договору поставки" }
+  ]
+}`
 
-1. 💰 **АНАЛИЗ ОПЕРАЦИЙ ПО НАЗНАЧЕНИЮ ПЛАТЕЖА**
-   Цель: Определить, какие операции являются выручкой от реализации товаров и услуг.
-   
-   Что нужно сделать:
-   - Проанализируй каждую операцию в JSON данных
-   - По полю "Назначение платежа" определи, является ли операция оплатой от клиентов за товары или услуги
-   - Включи в выручку только операции, которые явно связаны с продажей товаров/услуг
-   
-   Примеры операций, которые ЯВЛЯЮТСЯ выручкой:
-   - "Оплата за товары", "Оплата за услуги", "Оплата по договору поставки"
-   - "Оплата счета", "Оплата за выполненные работы"
-   - "Услуги"
-   - Любые операции, где в назначении платежа упоминается продажа товаров/услуг
-   
-   Примеры операций, которые НЕ ЯВЛЯЮТСЯ выручкой:
-   - "Возврат займа", "Погашение кредита", "Возврат средств"
-   - "Перевод между счетами", "Пополнение счета"
-   - "Ошибочное зачисление", "Возврат товара"
-   - Любые внутренние переводы или финансовые операции
-
-2. 💱 **УЧЁТ ВАЛЮТНЫХ СЧЕТОВ**
-   Цель: Корректно включить валютную выручку в общую сумму.
-   
-   Что нужно сделать:
-   - Если в данных есть поле "Курс" или информация о валюте - используй его для конвертации
-   - Конвертируй валютные суммы в тенге по курсу на дату операции
-   - Если курс не указан, используй средний курс за период или укажи это в отчете
-
-3. 📅 **ГРУППИРОВКА ПО МЕСЯЦАМ**
-   Цель: Посмотреть динамику продаж во времени.
-   
-   Что нужно сделать:
-   - Используй поле "Дата" из JSON данных для группировки
-   - Сгруппируй операции по месяцам и годам
-   - Рассчитай сумму выручки за каждый месяц
-   - Убедись, что покрыт весь период из выписок
-
-4. 📈 **ФОРМИРОВАНИЕ СВОДНОГО АНАЛИЗА**
-   Цель: Подготовить понятный итог для отчёта.
-   
-   Что нужно сделать:
-   - Сделай сводную таблицу с колонками:
-     * Месяц
-     * Количество операций
-     * Чистая выручка (KZT)
-   - Подсчитай общую сумму выручки за весь период
-
-5. ⚖️ **СРАВНЕНИЕ С ТРЕБОВАНИЯМИ ПЛАТФОРМЫ**
-   Цель: Проверить соответствие лимиту.
-   
-   Что нужно сделать:
-   - Сравни общую чистую выручку за 12 месяцев с порогом 60 млн тенге
-   - Если меньше — компания НЕ соответствует требованиям платформы
-   - Если больше или равна — компания соответствует требованиям
-
-📋 **СТРУКТУРА ОТЧЕТА (ОБЯЗАТЕЛЬНАЯ ФОРМА ВЫДАЧИ)**
-
-Ответ нужно оформить строго в следующей логике и порядке разделов (без лишних заголовков и таблиц, можно использовать маркеры и переносы строк):
-
-1. **Операции не являющиеся выручкой**
-   - Для каждого календарного года по возрастанию выведи отдельный JSON-блок со следующей структурой:
-     
-     Операции не являющиеся выручкой (JSON)  
-     {
-       "год": 2025,
-       "месяцы": [
-         {
-           "месяц": "март",
-           "операции": [
-             { "дата": "2025-03-01", "сумма": "1 000 000 KZT", "назначение": "краткое описание" },
-             { "дата": "2025-03-12", "сумма": "500 000 KZT", "назначение": "..." }
-             // ... каждая операция отдельно
-           ],
-           "итого_за_месяц": "1 500 000 KZT"
-         },
-         {
-           "месяц": "апрель",
-           "операции": [
-             { "дата": "...", "сумма": "... KZT", "назначение": "..." }
-           ],
-           "итого_за_месяц": "2 000 000 KZT"
-         }
-         // ... включи все месяцы, где есть такие операции
-       ],
-       "итого_за_год": "3 500 000 KZT"
-     }
-     
-     Затем аналогично для следующего года (2024, 2023 и т.д., если данные есть).
-
-2. **Чистая выручка**
-   - Под "чистой выручкой" здесь понимается общая выручка от реализации товаров/услуг (без уменьшения на расходы).
-   - Для каждого календарного года по возрастанию выведи отдельный JSON-блок с аналогичной детализацией:
-     
-     Чистая выручка (JSON)  
-     {
-       "год": 2025,
-       "месяцы": [
-         {
-           "месяц": "январь",
-           "операции": [
-             { "дата": "2025-01-05", "сумма": "2 400 000 KZT", "назначение": "оплата по договору 123" },
-             { "дата": "2025-01-18", "сумма": "800 000 KZT", "назначение": "оплата за услуги" }
-             // ... по всем операциям месяца
-           ],
-           "итого_за_месяц": "3 200 000 KZT"
-         },
-         {
-           "месяц": "февраль",
-           "операции": [
-             { "дата": "2025-02-02", "сумма": "1 100 000 KZT", "назначение": "..." }
-           ],
-           "итого_за_месяц": "1 100 000 KZT"
-         }
-         // ... включи все месяцы, где есть выручка
-       ],
-       "итого_за_год": "4 300 000 KZT"
-     }
-     
-     Затем аналогично для следующего года (2024, 2023 и т.д., если данные есть).
-
-3. **Чистая выручка за последние 12 месяцев**
-   - Определи 12 последовательных месяцев, исходя из максимальной даты операции в данных.
-   - Укажи общую сумму чистой выручки за эти последние 12 месяцев:
-     
-     Чистая выручка за последние 12 месяцев из выписок: [сумма] KZT
-
-4. **Краткий вывод о соответствии требованиям платформы**
-   - Сравни чистую выручку за последние 12 месяцев с порогом 60 млн KZT и кратко зафиксируй:
-     - ✅ СООТВЕТСТВУЕТ требованиям (выручка ≥ 60 млн KZT)
-     - ❌ НЕ СООТВЕТСТВУЕТ требованиям (выручка < 60 млн KZT)
-
----
-
-ВАЖНО:
-- Ты получаешь JSON-данные, которые уже содержат только операции по кредиту (поступления на счёт).
-- Эти данные могут быть в ОДНОМ JSON-файле, который содержит несколько разных выписок (разные банки, разные периоды).
-- Перед любыми расчётами ОБЯЗАТЕЛЬНО объедини все операции из всех выписок в один массив и отсортируй их по дате (по возрастанию).
-- Все операции имеют поля: Дата, Кредит, Назначение платежа и другие — анализируй каждую операцию по полю "Назначение платежа".
-- Используй Code Interpreter для загрузки JSON-файла, его парсинга, сортировки по датам, фильтрации и расчётов.
-- Все суммы указывай только в KZT, с разделителями тысяч.
-- Будь точным с датами, годами и периодами, не пропускай месяцы, если по ним есть операции.
-- Строго запрещено придумывать суммы, даты, назначение платежа или другие реквизиты. Все значения берутся только из JSON.
-- Перед формированием отчёта обязательно:
-  1. Загрузить JSON и вывести в рабочем чате первые 3–5 операций каждого анализируемого месяца (дата, сумма, назначение), чтобы зафиксировать источник данных.
-  2. После примеров обязательно включи в финальные JSON-блоки абсолютно все операции месяца без сокрытия/многоточий/ссылок — список должен полностью совпадать с данными файла.
-  3. Проверить, что каждая операция, попавшая в итоговый отчёт, существует в исходном JSON (совпадают дата, сумма и назначение). Если операция не найдена — не включай её.
-- Для расчётов предварительно очищай суммы от пробелов, неразрывных пробелов и заменяй запятую на точку; после вычислений форматируй сумму обратно с разделителями тысяч.
-- Если классификация операции вызывает сомнение, явно укажи это и не относись её ни к выручке, ни к не-выручке до получения дополнительной информации.
-- Не отправляй финальный ответ, пока полностью не сформированы все обязательные разделы (операции не выручка, чистая выручка, 12 месяцев, вывод). Финальный отчёт должен приходить ОДНИМ сообщением после завершения всех расчётов, без промежуточных черновиков.`
-
-const defaultUserPrompt = `${financialAnalystInstructions}
-
-Проанализируй прикреплённые JSON данные с операциями по кредиту из банковских выписок и подготовь отчёт строго по указанной выше инструкции.`
-
-const createFinancialAnalystAgent = (fileIds = []) => {
-  if (!Agent || !codeInterpreterTool) {
+const createTransactionClassifierAgent = () => {
+  if (!Agent) {
     throw new Error('Agents SDK не загружен. Вызовите loadAgentsSDK() сначала.')
   }
-  const toolConfig = {
-    container: { type: 'auto' },
-  }
-
-  if (Array.isArray(fileIds) && fileIds.length > 0) {
-    toolConfig.container.file_ids = fileIds
-  }
-
   return new Agent({
-    name: 'Financial Analyst',
-    instructions: financialAnalystInstructions,
-    model: 'gpt-5',
+    name: 'Revenue Classifier',
+    instructions: transactionClassifierInstructions,
+    model: 'gpt-5-mini',
     modelSettings: { store: true },
-    tools: [codeInterpreterTool(toolConfig)],
   })
+}
+
+const safeJsonParse = (value) => {
+  if (typeof value !== 'string') return null
+  try {
+    return JSON.parse(value)
+  } catch {
+    return null
+  }
+}
+
+const MONTH_NAMES_RU = [
+  'январь',
+  'февраль',
+  'март',
+  'апрель',
+  'май',
+  'июнь',
+  'июль',
+  'август',
+  'сентябрь',
+  'октябрь',
+  'ноябрь',
+  'декабрь',
+]
+
+const REVENUE_KEYWORDS = [
+  'оплата',
+  'за товар',
+  'за товары',
+  'за услугу',
+  'за услуги',
+  'договор',
+  'invoice',
+  'contract',
+  'поставка',
+  'продажа',
+  'реализац',
+  'sales',
+  'services',
+  'услуги',
+  'работы',
+  'покупатель',
+  'customer',
+]
+
+const NON_REVENUE_KEYWORDS = [
+  'займ',
+  'кредит',
+  'loan',
+  'return',
+  'возврат',
+  'перевод',
+  'между своими',
+  'пополнение',
+  'депозит',
+  'вклад',
+  'refund',
+  'transfer',
+  'инвести',
+  'дивиденды',
+  'дивиденд',
+  'штраф',
+  'налог',
+  'tax',
+  'penalty',
+  'зарплат',
+  'з/п',
+  'зарплата',
+  'salary',
+  'членский',
+  'membership',
+  'взнос',
+  'страхов',
+]
+
+const normalizeWhitespace = (value) =>
+  (typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '')
+
+const getFieldValue = (transaction, keys) => {
+  if (!transaction || typeof transaction !== 'object') return ''
+  for (const key of keys) {
+    if (transaction[key] !== undefined && transaction[key] !== null) {
+      const value = transaction[key]
+      if (typeof value === 'string') return value
+      if (typeof value === 'number') return value.toString()
+    }
+  }
+  return ''
+}
+
+const extractPurpose = (transaction) =>
+  normalizeWhitespace(
+    getFieldValue(transaction, [
+      'Назначение платежа',
+      'назначение платежа',
+      'Назначение',
+      'назначение',
+      'Purpose',
+      'purpose',
+      'Комментарий',
+      'comment',
+      'description',
+      'Description',
+      'Details',
+    ])
+  )
+
+const extractSender = (transaction) =>
+  normalizeWhitespace(
+    getFieldValue(transaction, [
+      'Отправитель',
+      'отправитель',
+      'Плательщик',
+      'плательщик',
+      'Контрагент',
+      'counterparty',
+      'sender',
+      'payer',
+    ])
+  )
+
+const extractAmountRaw = (transaction) =>
+  getFieldValue(transaction, [
+    'Кредит',
+    'credit',
+    'Сумма',
+    'сумма',
+    'Amount',
+    'amount',
+    'value',
+  ])
+
+const sanitizeNumberString = (value) => {
+  if (typeof value !== 'string') return ''
+  return value
+    .replace(/\u00a0/g, '')
+    .replace(/[^0-9,.\-]/g, '')
+    .replace(',', '.')
+    .trim()
+}
+
+const parseAmountNumber = (value) => {
+  if (value === null || value === undefined) return 0
+  const stringValue = typeof value === 'number' ? value.toString() : String(value)
+  const sanitized = sanitizeNumberString(stringValue)
+  if (!sanitized) return 0
+  const parsed = Number(sanitized)
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+const tryParseDate = (value) => {
+  if (!value) return null
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value
+  const raw = value.toString().trim()
+  if (!raw) return null
+  const direct = Date.parse(raw)
+  if (!Number.isNaN(direct)) return new Date(direct)
+  const dotMatch = raw.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})$/)
+  if (dotMatch) {
+    const [, dd, mm, yy] = dotMatch
+    const day = Number(dd)
+    const month = Number(mm) - 1
+    const year =
+      yy.length === 2 ? Number(yy) + (Number(yy) > 70 ? 1900 : 2000) : Number(yy)
+    const date = new Date(Date.UTC(year, month, day))
+    return Number.isNaN(date.getTime()) ? null : date
+  }
+  const monthWords = {
+    января: 0,
+    февраль: 1,
+    февраля: 1,
+    март: 2,
+    марта: 2,
+    апрель: 3,
+    апреля: 3,
+    май: 4,
+    мая: 4,
+    июнь: 5,
+    июня: 5,
+    июль: 6,
+    июля: 6,
+    август: 7,
+    августа: 7,
+    сентябрь: 8,
+    сентября: 8,
+    октябрь: 9,
+    октября: 9,
+    ноябрь: 10,
+    ноября: 10,
+    декабрь: 11,
+    декабря: 11,
+  }
+  const wordMatch = raw
+    .toLowerCase()
+    .match(/^(\d{1,2})\s+([а-яa-z]+)\s+(\d{2,4})$/i)
+  if (wordMatch) {
+    const [, dd, monthWord, yy] = wordMatch
+    const month = monthWords[monthWord]
+    if (month !== undefined) {
+      const day = Number(dd)
+      const year =
+        yy.length === 2 ? Number(yy) + (Number(yy) > 70 ? 1900 : 2000) : Number(yy)
+      const date = new Date(Date.UTC(year, month, day))
+      return Number.isNaN(date.getTime()) ? null : date
+    }
+  }
+  return null
+}
+
+const extractTransactionDate = (transaction) => {
+  const value = getFieldValue(transaction, [
+    'Дата',
+    'дата',
+    'Date',
+    'date',
+    'Дата операции',
+    'дата операции',
+    'Дата платежа',
+    'дата платежа',
+    'Value Date',
+    'value date',
+  ])
+  return tryParseDate(value)
+}
+
+const formatCurrencyKzt = (amount) => {
+  const normalized = Number.isFinite(amount) ? amount : 0
+  return `${normalized.toLocaleString('ru-RU', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })} KZT`
+}
+
+const classifyTransactionHeuristically = (transaction) => {
+  const purpose = extractPurpose(transaction).toLowerCase()
+  if (!purpose) {
+    return { type: 'ambiguous', reason: 'нет назначения платежа' }
+  }
+  const contains = (keywords) => keywords.some((keyword) => purpose.includes(keyword))
+  if (contains(NON_REVENUE_KEYWORDS)) {
+    return { type: 'non_revenue', reason: 'обнаружены маркеры невыручки' }
+  }
+  if (contains(REVENUE_KEYWORDS)) {
+    return { type: 'revenue', reason: 'обнаружены маркеры выручки' }
+  }
+  return { type: 'ambiguous', reason: 'нет явных маркеров' }
+}
+
+const attachInternalTransactionIds = (transactions = [], sessionId) =>
+  transactions.map((transaction, index) => {
+    const existingId =
+      transaction?._ikap_tx_id ||
+      transaction?.transaction_id ||
+      transaction?.id ||
+      transaction?.ID
+    const generatedId = existingId || `${sessionId || 'sess'}_${index + 1}`
+    return {
+      ...transaction,
+      _ikap_tx_id: generatedId,
+    }
+  })
+
+const splitTransactionsByConfidence = (transactions = []) => {
+  const obviousRevenue = []
+  const needsReview = []
+
+  for (const transaction of transactions) {
+    const classification = classifyTransactionHeuristically(transaction)
+    if (classification.type === 'revenue') {
+      obviousRevenue.push({
+        ...transaction,
+        _ikap_classification_source: 'heuristic',
+        _ikap_classification_reason: classification.reason,
+      })
+      continue
+    }
+    needsReview.push({
+      ...transaction,
+      _ikap_classification_source: 'agent_required',
+      _ikap_classification_reason: classification.reason,
+      _ikap_possible_non_revenue: classification.type === 'non_revenue',
+    })
+  }
+
+  return { obviousRevenue, needsReview }
+}
+
+const buildClassifierPrompt = (transactions) => {
+  const simplified = transactions.map((transaction) => ({
+    id: transaction._ikap_tx_id,
+    date: getFieldValue(transaction, ['Дата', 'дата', 'Date', 'date']),
+    amount: extractAmountRaw(transaction),
+    purpose: extractPurpose(transaction),
+    sender: extractSender(transaction),
+    comment: getFieldValue(transaction, ['Комментарий', 'comment', 'Примечание']),
+  }))
+
+  return [
+    'Ниже операции, которые нужно классифицировать как выручка или нет.',
+    'Верни JSON в соответствии с инструкцией, без дополнительных пояснений.',
+    'transactions_for_review:',
+    '```json',
+    JSON.stringify(simplified, null, 2),
+    '```',
+  ]
+    .filter(Boolean)
+    .join('\n')
+}
+
+const parseClassifierResponse = (text) => {
+  if (!text) return []
+  const parsed = safeJsonParse(text)
+  if (!parsed) return []
+  if (Array.isArray(parsed)) return parsed
+  if (Array.isArray(parsed.transactions)) return parsed.transactions
+  return []
+}
+
+const aggregateByYearMonth = (transactions = []) => {
+  const yearMap = new Map()
+
+  for (const transaction of transactions) {
+    const amount = parseAmountNumber(extractAmountRaw(transaction))
+    if (!amount) continue
+    const date = extractTransactionDate(transaction)
+    if (!date) continue
+    const year = date.getUTCFullYear()
+    const month = date.getUTCMonth()
+    const yearEntry = yearMap.get(year) || { total: 0, months: new Map() }
+    yearEntry.total += amount
+    const monthValue = yearEntry.months.get(month) || 0
+    yearEntry.months.set(month, monthValue + amount)
+    yearMap.set(year, yearEntry)
+  }
+
+  return Array.from(yearMap.entries())
+    .sort(([yearA], [yearB]) => yearA - yearB)
+    .map(([year, data]) => ({
+      year,
+      value: data.total,
+      formatted: formatCurrencyKzt(data.total),
+      months: Array.from(data.months.entries())
+        .sort(([monthA], [monthB]) => monthA - monthB)
+        .map(([month, value]) => ({
+          month: MONTH_NAMES_RU[month] || String(month + 1),
+          value,
+          formatted: formatCurrencyKzt(value),
+        })),
+    }))
+}
+
+const computeTrailing12Months = (transactions = []) => {
+  const dated = transactions
+    .map((transaction) => ({
+      amount: parseAmountNumber(extractAmountRaw(transaction)),
+      date: extractTransactionDate(transaction),
+    }))
+    .filter((item) => item.amount && item.date)
+
+  if (!dated.length) {
+    return { total: 0, referenceDate: null }
+  }
+
+  const referenceDate = dated.reduce(
+    (latest, current) => (current.date > latest ? current.date : latest),
+    dated[0].date
+  )
+  const windowStart = new Date(referenceDate)
+  windowStart.setUTCDate(1)
+  windowStart.setUTCFullYear(referenceDate.getUTCFullYear())
+  windowStart.setUTCMonth(referenceDate.getUTCMonth() - 11)
+
+  const total = dated
+    .filter((item) => item.date >= windowStart && item.date <= referenceDate)
+    .reduce((sum, item) => sum + item.amount, 0)
+
+  return { total, referenceDate }
+}
+
+const buildStructuredSummary = ({
+  revenueTransactions,
+  nonRevenueTransactions,
+  stats,
+}) => {
+  const revenueSummary = aggregateByYearMonth(revenueTransactions)
+  const nonRevenueSummary = aggregateByYearMonth(nonRevenueTransactions)
+  const totalRevenue = revenueSummary.reduce((sum, year) => sum + year.value, 0)
+  const totalNonRevenue = nonRevenueSummary.reduce((sum, year) => sum + year.value, 0)
+  const trailing = computeTrailing12Months(revenueTransactions)
+
+  return {
+    generatedAt: new Date().toISOString(),
+    totals: {
+      revenue: {
+        value: totalRevenue,
+        formatted: formatCurrencyKzt(totalRevenue),
+      },
+      nonRevenue: {
+        value: totalNonRevenue,
+        formatted: formatCurrencyKzt(totalNonRevenue),
+      },
+    },
+    revenue: {
+      totalValue: totalRevenue,
+      totalFormatted: formatCurrencyKzt(totalRevenue),
+      years: revenueSummary,
+    },
+    nonRevenue: {
+      totalValue: totalNonRevenue,
+      totalFormatted: formatCurrencyKzt(totalNonRevenue),
+      years: nonRevenueSummary,
+    },
+    trailing12MonthsRevenue: {
+      value: trailing.total,
+      formatted: formatCurrencyKzt(trailing.total),
+      referencePeriodEndsAt: trailing.referenceDate
+        ? trailing.referenceDate.toISOString()
+        : null,
+    },
+    stats,
+  }
 }
 
 const normalizeMetadata = (raw) => {
@@ -853,19 +1110,6 @@ const summariseFilesForLog = (files = []) =>
     mime: file.mimetype,
   }))
 
-const buildPromptFromMetadata = (metadata) => {
-  if (!metadata || typeof metadata !== 'object') return ''
-  const entries = Object.entries(metadata)
-    .filter(([, value]) => value !== undefined && value !== null && value !== '')
-    .map(([key, value]) => `- ${key}: ${typeof value === 'object' ? JSON.stringify(value) : value}`)
-
-  if (entries.length === 0) {
-    return ''
-  }
-
-  return `Дополнительные данные от сотрудника:\n${entries.join('\n')}`
-}
-
 // Защита от дублирования запросов
 const activeAnalysisSessions = new Set()
 
@@ -919,6 +1163,7 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
     const attachments = []
     const pdfFiles = []
     const otherFiles = []
+    let extractedTransactions = []
 
     // Разделяем файлы на PDF и остальные
     for (const file of files) {
@@ -981,10 +1226,13 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
         
         console.log(`📊 Итого собрано транзакций: ${allTransactions.length}`)
 
+        const transactionsWithInternalIds = attachInternalTransactionIds(allTransactions, sessionId)
+        extractedTransactions = transactionsWithInternalIds
+
         // Создаем JSON файл с результатами конвертации (даже если транзакций нет)
         const jsonData = {
           metadata: allMetadata,
-          transactions: allTransactions,
+          transactions: transactionsWithInternalIds,
           summary: {
             total_files: pdfFiles.length,
             total_transactions: allTransactions.length,
@@ -1134,88 +1382,54 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
       console.error('⚠️ Не удалось создать запись отчёта перед анализом', error)
     }
 
-    const metadataPrompt = buildPromptFromMetadata(metadata)
-    
-    // Формируем промпт с учетом того, что PDF уже конвертированы в JSON
-    let jsonDataInPrompt = ''
-    const jsonAttachments = attachments.filter(a => a.is_converted && a.json_data)
-    const jsonFileAttachments = attachments.filter(a => a.is_converted && a.file_id && !a.json_data)
-    
-    // Если JSON загружен как файл, добавляем инструкции в промпт
-    if (jsonFileAttachments.length > 0) {
-      jsonDataInPrompt = `\n\n📊 **ДАННЫЕ ИЗ БАНКОВСКИХ ВЫПИСОК:**\n\nДанные из банковских выписок загружены в файл JSON, доступный в Code Interpreter. Файл содержит все операции по КРЕДИТУ (поступления на счет), уже отфильтрованные из исходных PDF.\n\n**Структура данных в файле:**\n- \`metadata\`: метаданные о выписках (источник, метод извлечения)\n- \`transactions\`: массив транзакций с полями: Дата, №, Кредит, Назначение платежа, Отправитель, и другие\n- \`summary\`: сводная информация (количество файлов, транзакций)\n\n**Задача:**\n1. Загрузи JSON файл в Code Interpreter\n2. Проанализируй каждую транзакцию по полю "Назначение платежа"\n3. Определи, является ли операция выручкой от реализации товаров и услуг\n4. Исключи операции, которые НЕ являются выручкой (возвраты, переводы между счетами, займы и т.д.)\n5. Подсчитай чистую выручку по месяцам\n\n**Используй Code Interpreter для:**\n- Загрузки и парсинга JSON файла\n- Фильтрации транзакций по назначению платежа\n- Группировки по месяцам\n- Расчетов сумм выручки`
-    } else if (jsonAttachments.length > 0) {
-      // Fallback: если JSON не загружен как файл (старый метод для маленьких файлов)
-      const allJsonData = jsonAttachments.map(att => att.json_data).join('\n\n--- Следующий файл ---\n\n')
-      jsonDataInPrompt = `\n\n📊 **ДАННЫЕ ИЗ БАНКОВСКИХ ВЫПИСОК (JSON):**\n\nВсе операции уже отфильтрованы - остались только операции по КРЕДИТУ (поступления на счет). Проанализируй каждую операцию по полю "Назначение платежа" и определи, является ли она выручкой от реализации товаров и услуг.\n\n\`\`\`json\n${allJsonData}\n\`\`\``
+    const transactionsWithIds = Array.isArray(extractedTransactions)
+      ? extractedTransactions
+      : []
+
+    const { obviousRevenue, needsReview } = splitTransactionsByConfidence(transactionsWithIds)
+    const classificationStats = {
+      totalTransactions: transactionsWithIds.length,
+      autoRevenue: obviousRevenue.length,
+      agentReviewed: needsReview.length,
     }
-    
-    const combinedPrompt = [defaultUserPrompt, jsonDataInPrompt, metadataPrompt, comment]
-      .filter(Boolean)
-      .join('\n\n')
 
-    // Собираем все file_ids (включая JSON файлы и другие файлы)
-    const fileIds = attachments
-      .filter(a => a.file_id) // Только attachments с file_id
-      .map((attachment) => attachment.file_id)
-      .filter(Boolean)
-    const analystAgent = createFinancialAnalystAgent(fileIds)
+    console.log('🧮 Подготовка операций перед классификацией', {
+      sessionId,
+      ...classificationStats,
+    })
 
-    // Формируем входные данные для агента
-    const agentInput = []
-    
-    // Основной промпт с JSON данными
-    agentInput.push({
+    ;(async () => {
+      try {
+        let runResult = null
+        let rawNewItems = []
+        let classificationEntries = []
+
+        if (needsReview.length > 0) {
+          await loadAgentsSDK()
+          if (!analysisRunner) {
+            analysisRunner = new Runner({})
+          }
+          const classifierAgent = createTransactionClassifierAgent()
+          const agentInput = [
+            {
       role: 'user',
       content: [
         {
           type: 'input_text',
-          text: combinedPrompt,
-        },
-      ],
-    })
-    
-    // Файлы уже переданы через file_ids в toolConfig, поэтому не нужно добавлять их отдельно
-    // Code Interpreter автоматически получит доступ ко всем файлам через file_ids
+                  text: buildClassifierPrompt(needsReview),
+                },
+              ],
+            },
+          ]
 
-    // Подсчитываем общее количество транзакций
-    const totalTransactions = jsonFileAttachments.reduce((sum, att) => sum + (att.transaction_count || 0), 0) +
-      jsonAttachments.reduce((sum, att) => {
-        try {
-          const data = JSON.parse(att.json_data)
-          return sum + (data.transactions?.length || 0)
-        } catch {
-          return sum
-        }
-      }, 0)
-
-    console.log('🤖 Запускаем финансового аналитика через Runner (async)', {
+          console.log('🤖 Запускаем классификатор операций через Runner (async)', {
       sessionId,
-      fileIds: fileIds.length,
-      jsonFileAttachments: jsonFileAttachments.length,
-      jsonAttachmentsInPrompt: jsonAttachments.length,
-      totalTransactions,
-      promptSize: combinedPrompt.length,
-      promptPreview: combinedPrompt.slice(0, 200),
-    })
-    
-    // ВАЖНО: Проверяем, что мы отправляем только ОДИН запрос для всех выписок
-    if (jsonFileAttachments.length > 0) {
-      console.log(`✅ Все выписки объединены в ${jsonFileAttachments.length} JSON файл(ов) и будут доступны через Code Interpreter`)
-    } else if (jsonAttachments.length > 1) {
-      console.log(`✅ Все ${jsonAttachments.length} выписки объединены в один JSON и включены в промпт`)
-    }
+            needsReview: needsReview.length,
+          })
 
-    ;(async () => {
-      try {
-        // Убеждаемся, что SDK загружен
-        await loadAgentsSDK()
-        if (!analysisRunner) {
-          analysisRunner = new Runner({})
-        }
-        const runResult = await analysisRunner.run(analystAgent, agentInput)
+          runResult = await analysisRunner.run(classifierAgent, agentInput)
 
-        const rawNewItems = Array.isArray(runResult.newItems)
+          rawNewItems = Array.isArray(runResult.newItems)
           ? runResult.newItems.map((item) => item?.rawItem || item)
           : []
 
@@ -1267,26 +1481,94 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
             ''
         }
 
+          classificationEntries = parseClassifierResponse(finalOutputText)
+
+          console.log('🗂️ Результаты классификации от агента', {
+            sessionId,
+            parsedTransactions: classificationEntries.length,
+            responseId: runResult.lastResponseId,
+          })
+        }
+
+        const decisionsMap = new Map()
+        for (const entry of classificationEntries) {
+          if (!entry || !entry.id) continue
+          const key = String(entry.id)
+          const isRevenue =
+            entry.is_revenue ??
+            entry.isRevenue ??
+            entry.revenue ??
+            (entry.label === 'revenue')
+          decisionsMap.set(key, {
+            isRevenue: Boolean(isRevenue),
+            reason: entry.reason || entry.explanation || '',
+          })
+        }
+
+        const reviewedRevenue = []
+        const reviewedNonRevenue = []
+
+        for (const transaction of needsReview) {
+          const decision =
+            decisionsMap.get(String(transaction._ikap_tx_id)) ||
+            decisionsMap.get(transaction._ikap_tx_id)
+          const isRevenue = decision ? decision.isRevenue : false
+          const reason =
+            decision?.reason ||
+            (decision ? '' : 'нет решения от агента, по умолчанию не выручка')
+
+          const enriched = {
+            ...transaction,
+            _ikap_classification_source: decision ? 'agent' : 'agent_missing',
+            _ikap_classification_reason: reason,
+          }
+
+          if (isRevenue) {
+            reviewedRevenue.push(enriched)
+          } else {
+            reviewedNonRevenue.push(enriched)
+          }
+        }
+
+        const finalRevenueTransactions = [...obviousRevenue, ...reviewedRevenue]
+        const finalNonRevenueTransactions = reviewedNonRevenue
+
+        const structuredSummary = buildStructuredSummary({
+          revenueTransactions: finalRevenueTransactions,
+          nonRevenueTransactions: finalNonRevenueTransactions,
+          stats: {
+            ...classificationStats,
+            agentDecisions: decisionsMap.size,
+            unresolved: Math.max(0, needsReview.length - decisionsMap.size),
+          },
+        })
+
         const completedAt = new Date().toISOString()
+        const finalReportPayload = JSON.stringify(structuredSummary, null, 2)
+        const openaiStatus =
+          needsReview.length === 0 ? 'skipped' : decisionsMap.size > 0 ? 'completed' : 'partial'
 
         await upsertReport(sessionId, {
-          status: finalOutputText ? 'completed' : 'failed',
-          reportText: finalOutputText || 'Не удалось получить текст отчёта от агента.',
+          status: 'completed',
+          reportText: finalReportPayload,
           filesCount: files.length,
           filesData: filesDataJson,
           completed: completedAt,
           comment,
-          openaiResponseId: runResult.lastResponseId || null,
-          openaiStatus: finalOutputText ? 'completed' : 'failed',
+          openaiResponseId: runResult?.lastResponseId || null,
+          openaiStatus,
         })
 
-        console.log('📦 Анализ завершён (async)', {
+        console.log('📦 Классификация операций завершена (async)', {
           sessionId,
           durationMs: Date.now() - startedAt.getTime(),
-          responseId: runResult.lastResponseId,
+          totalTransactions: transactionsWithIds.length,
+          autoRevenue: obviousRevenue.length,
+          reviewedByAgent: needsReview.length,
+          agentDecisions: decisionsMap.size,
         })
       } catch (streamError) {
-        console.error('❌ Ошибка в фоне при обработке анализа', {
+        console.error('❌ Ошибка в фоне при обработке классификации', {
           sessionId,
           error: streamError.message,
         })
@@ -1309,7 +1591,7 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
         activeAnalysisSessions.delete(sessionId)
       }
     })().catch((unhandled) => {
-      console.error('❌ Необработанная ошибка фонового анализа', {
+      console.error('❌ Необработанная ошибка фоновой классификации', {
         sessionId,
         error: unhandled?.message || unhandled,
       })
