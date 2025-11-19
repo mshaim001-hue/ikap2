@@ -578,16 +578,28 @@ const transactionClassifierInstructions = `Ты финансовый анали�
 
 Данные:
 - Ты получишь JSON-массив \`transactions_for_review\`.
-- Каждая операция имеет как минимум поля \`id\`, \`date\`, \`amount\`, \`purpose\`, иногда \`sender\`/\`comment\`.
+- Каждая операция имеет поля: \`id\`, \`date\`, \`amount\`, \`purpose\`, иногда \`sender\`, \`comment\`, \`correspondent\`, \`bin\`.
 
 Требования:
 1. Для каждой операции верни признак \`is_revenue\` (true/false) и короткое объяснение \`reason\`.
-2. Считай выручкой только платежи клиентов за товары/услуги или их прямые аналоги ("оплата", "реализация", "invoice", "services", "goods", "договор поставки" и т.п.).
-3. Не относись к выручке переводы между собственными счетами, возвраты, займы/кредиты, инвестиции, субсидии, пополнения, депозиты, дивиденды, зарплаты, налоги, штрафы, возврат оплаты клиенту и т.п.
-4. Если формулировка явно указывает на невыручку — ставь false.
-5. Если формулировка явно указывает на продажу товаров/услуг — ставь true.
-6. Если текст нейтральный, но похож на оплату клиента (invoice, payment for contract) — выбирай true.
-7. Если сомневаешься между внутренним переводом и оплатой клиента — выбирай false (консервативно) и поясни почему.
+2. Считай выручкой платежи клиентов за товары/услуги или их прямые аналоги ("оплата", "реализация", "invoice", "services", "goods", "договор поставки", "СФ", "счет-фактура", "акт оказанных услуг" и т.п.).
+3. НЕ относись к выручке:
+   - Явные возвраты ("возврат средств", "возврат за непредоставленные", "refund")
+   - Переводы между собственными счетами одной компании (если видно по БИН/ИИН или названию)
+   - Займы/кредиты, инвестиции, субсидии, депозиты, дивиденды, зарплаты, налоги, штрафы
+   - Безвозмездная помощь, материальная помощь
+4. Особые случаи:
+   - "Пополнение счета" — может быть выручкой, если это пополнение от клиента (проверь корреспондента и БИН)
+   - "Перевод со счета карты" — может быть выручкой, если это перевод от клиента на счет компании (проверь контекст)
+   - Если в назначении есть упоминание договора, счета-фактуры, акта, услуг, работ — скорее всего выручка
+   - Если перевод между счетами одной компании (одинаковый БИН/ИИН) — не выручка
+5. Анализируй контекст:
+   - Проверяй поле \`correspondent\` (корреспондент) — если это известный клиент или организация, это может быть выручка
+   - Проверяй поле \`bin\` (БИН/ИИН) — если совпадает с получателем, это внутренний перевод
+   - Если в назначении есть номера договоров, счетов-фактур, актов — это обычно выручка
+6. Если формулировка явно указывает на продажу товаров/услуг — ставь true.
+7. Если текст нейтральный, но похож на оплату клиента (invoice, payment for contract, СФ, акт) — выбирай true.
+8. Если сомневаешься — анализируй контекст (корреспондент, БИН, наличие договоров/счетов), а не выбирай false по умолчанию.
 
 Формат ответа — строго JSON без текста:
 {
@@ -650,6 +662,18 @@ const REVENUE_KEYWORDS = [
   'работы',
   'покупатель',
   'customer',
+  'сф#',
+  'счет-фактура',
+  'счет фактура',
+  'акт оказанных',
+  'акт оказ',
+  'акт услуг',
+  'зп#',
+  'уведомление',
+  'опл прочих',
+  'оплата прочих',
+  'оплата услуг',
+  'оплата работ',
 ]
 
 const NON_REVENUE_KEYWORDS = [
@@ -657,14 +681,13 @@ const NON_REVENUE_KEYWORDS = [
   'кредит',
   'loan',
   'return',
-  'возврат',
-  'перевод',
+  'возврат средств',
+  'возврат денежных средств',
+  'возврат за непредоставленные',
   'между своими',
-  'пополнение',
   'депозит',
   'вклад',
   'refund',
-  'transfer',
   'инвести',
   'дивиденды',
   'дивиденд',
@@ -680,6 +703,9 @@ const NON_REVENUE_KEYWORDS = [
   'membership',
   'взнос',
   'страхов',
+  'безвозмездная',
+  'безвозмездный',
+  'материальная помощь',
 ]
 
 const normalizeWhitespace = (value) =>
@@ -846,12 +872,24 @@ const classifyTransactionHeuristically = (transaction) => {
     return { type: 'ambiguous', reason: 'нет назначения платежа' }
   }
   const contains = (keywords) => keywords.some((keyword) => purpose.includes(keyword))
+  
+  // Сначала проверяем явные маркеры невыручки
   if (contains(NON_REVENUE_KEYWORDS)) {
     return { type: 'non_revenue', reason: 'обнаружены маркеры невыручки' }
   }
+  
+  // Проверяем явные маркеры выручки
   if (contains(REVENUE_KEYWORDS)) {
     return { type: 'revenue', reason: 'обнаружены маркеры выручки' }
   }
+  
+  // "Пополнение счета" и "Перевод" без дополнительного контекста - неоднозначны
+  // Они могут быть как выручкой (от клиента), так и не выручкой (внутренний перевод)
+  // Поэтому отправляем на проверку агенту
+  if (purpose.includes('пополнение') || purpose.includes('перевод')) {
+    return { type: 'ambiguous', reason: 'пополнение/перевод требует анализа контекста' }
+  }
+  
   return { type: 'ambiguous', reason: 'нет явных маркеров' }
 }
 
@@ -901,6 +939,8 @@ const buildClassifierPrompt = (transactions) => {
     amount: extractAmountRaw(transaction),
     purpose: extractPurpose(transaction),
     sender: extractSender(transaction),
+    correspondent: getFieldValue(transaction, ['Корреспондент', 'корреспондент', 'Correspondent', 'correspondent']),
+    bin: getFieldValue(transaction, ['БИН/ИИН', 'БИН', 'ИИН', 'BIN', 'IIN', 'bin', 'iin']),
     comment: getFieldValue(transaction, ['Комментарий', 'comment', 'Примечание']),
   }))
 
@@ -1028,6 +1068,139 @@ const buildStructuredSummary = ({
     },
     stats,
   }
+}
+
+const formatReportAsText = (reportData) => {
+  if (!reportData) return 'Отчёт недоступен.'
+  
+  // Если это уже текст, возвращаем как есть
+  if (typeof reportData === 'string') {
+    try {
+      // Пробуем распарсить как JSON
+      const parsed = JSON.parse(reportData)
+      return formatReportAsText(parsed)
+    } catch {
+      // Если не JSON, возвращаем как текст
+      return reportData
+    }
+  }
+
+  // Если это объект, форматируем его
+  if (typeof reportData !== 'object' || Array.isArray(reportData)) {
+    return JSON.stringify(reportData, null, 2)
+  }
+
+  const lines = []
+  
+  // Заголовок
+  lines.push('📊 ФИНАНСОВЫЙ ОТЧЁТ')
+  lines.push('')
+  
+  // Дата генерации
+  if (reportData.generatedAt) {
+    const date = new Date(reportData.generatedAt)
+    lines.push(`Дата формирования: ${date.toLocaleString('ru-RU', { 
+      year: 'numeric', 
+      month: 'long', 
+      day: 'numeric', 
+      hour: '2-digit', 
+      minute: '2-digit' 
+    })}`)
+    lines.push('')
+  }
+
+  // Итоговые суммы
+  if (reportData.totals) {
+    lines.push('💰 ИТОГОВЫЕ СУММЫ')
+    lines.push('')
+    if (reportData.totals.revenue) {
+      lines.push(`Выручка: ${reportData.totals.revenue.formatted || formatCurrencyKzt(reportData.totals.revenue.value || 0)}`)
+    }
+    if (reportData.totals.nonRevenue) {
+      lines.push(`Не выручка: ${reportData.totals.nonRevenue.formatted || formatCurrencyKzt(reportData.totals.nonRevenue.value || 0)}`)
+    }
+    lines.push('')
+  }
+
+  // Выручка по годам и месяцам
+  if (reportData.revenue && reportData.revenue.years) {
+    lines.push('📈 ВЫРУЧКА')
+    lines.push('')
+    lines.push(`Общая сумма: ${reportData.revenue.totalFormatted || formatCurrencyKzt(reportData.revenue.totalValue || 0)}`)
+    lines.push('')
+    
+    for (const yearData of reportData.revenue.years) {
+      lines.push(`Год ${yearData.year}: ${formatCurrencyKzt(yearData.value || 0)}`)
+      
+      if (yearData.months && yearData.months.length > 0) {
+        for (const monthData of yearData.months) {
+          const monthName = monthData.month || MONTH_NAMES_RU[monthData.monthIndex] || 'неизвестно'
+          lines.push(`  • ${monthName.charAt(0).toUpperCase() + monthName.slice(1)}: ${monthData.formatted || formatCurrencyKzt(monthData.value || 0)}`)
+        }
+      }
+      lines.push('')
+    }
+  }
+
+  // Не выручка по годам и месяцам
+  if (reportData.nonRevenue && reportData.nonRevenue.years) {
+    lines.push('📉 НЕ ВЫРУЧКА')
+    lines.push('')
+    lines.push(`Общая сумма: ${reportData.nonRevenue.totalFormatted || formatCurrencyKzt(reportData.nonRevenue.totalValue || 0)}`)
+    lines.push('')
+    
+    for (const yearData of reportData.nonRevenue.years) {
+      lines.push(`Год ${yearData.year}: ${formatCurrencyKzt(yearData.value || 0)}`)
+      
+      if (yearData.months && yearData.months.length > 0) {
+        for (const monthData of yearData.months) {
+          const monthName = monthData.month || MONTH_NAMES_RU[monthData.monthIndex] || 'неизвестно'
+          lines.push(`  • ${monthName.charAt(0).toUpperCase() + monthName.slice(1)}: ${monthData.formatted || formatCurrencyKzt(monthData.value || 0)}`)
+        }
+      }
+      lines.push('')
+    }
+  }
+
+  // Выручка за последние 12 месяцев
+  if (reportData.trailing12MonthsRevenue) {
+    lines.push('📅 ВЫРУЧКА ЗА ПОСЛЕДНИЕ 12 МЕСЯЦЕВ')
+    lines.push('')
+    lines.push(`Сумма: ${reportData.trailing12MonthsRevenue.formatted || formatCurrencyKzt(reportData.trailing12MonthsRevenue.value || 0)}`)
+    if (reportData.trailing12MonthsRevenue.referencePeriodEndsAt) {
+      const refDate = new Date(reportData.trailing12MonthsRevenue.referencePeriodEndsAt)
+      lines.push(`Период заканчивается: ${refDate.toLocaleDateString('ru-RU', { 
+        year: 'numeric', 
+        month: 'long', 
+        day: 'numeric' 
+      })}`)
+    }
+    lines.push('')
+  }
+
+  // Статистика
+  if (reportData.stats) {
+    lines.push('📊 СТАТИСТИКА')
+    lines.push('')
+    if (reportData.stats.totalTransactions !== undefined) {
+      lines.push(`Всего транзакций: ${reportData.stats.totalTransactions}`)
+    }
+    if (reportData.stats.autoRevenue !== undefined) {
+      lines.push(`Автоматически классифицировано как выручка: ${reportData.stats.autoRevenue}`)
+    }
+    if (reportData.stats.agentReviewed !== undefined) {
+      lines.push(`Проверено агентом: ${reportData.stats.agentReviewed}`)
+    }
+    if (reportData.stats.agentDecisions !== undefined) {
+      lines.push(`Решений от агента: ${reportData.stats.agentDecisions}`)
+    }
+    if (reportData.stats.unresolved !== undefined && reportData.stats.unresolved > 0) {
+      lines.push(`Неразрешённых: ${reportData.stats.unresolved}`)
+    }
+    lines.push('')
+  }
+
+  return lines.join('\n').trim()
 }
 
 const normalizeMetadata = (raw) => {
@@ -1545,12 +1718,13 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
 
         const completedAt = new Date().toISOString()
         const finalReportPayload = JSON.stringify(structuredSummary, null, 2)
+        const formattedReportText = formatReportAsText(structuredSummary)
         const openaiStatus =
           needsReview.length === 0 ? 'skipped' : decisionsMap.size > 0 ? 'completed' : 'partial'
 
         await upsertReport(sessionId, {
           status: 'completed',
-          reportText: finalReportPayload,
+          reportText: formattedReportText,
           filesCount: files.length,
           filesData: filesDataJson,
           completed: completedAt,
@@ -1659,7 +1833,23 @@ app.get('/api/reports', async (_req, res) => {
 
     const list = Array.isArray(rows) ? rows : []
     const refreshed = await Promise.all(list.map((row) => maybeUpdateReportFromOpenAI(row)))
-    res.json(refreshed)
+    
+    // Форматируем report_text для каждого отчета, если это JSON
+    const formatted = refreshed.map((row) => {
+      if (row.report_text) {
+        try {
+          const parsed = JSON.parse(row.report_text)
+          if (parsed && typeof parsed === 'object' && (parsed.generatedAt || parsed.totals || parsed.revenue)) {
+            return { ...row, report_text: formatReportAsText(parsed) }
+          }
+        } catch {
+          // Если не JSON, оставляем как есть
+        }
+      }
+      return row
+    })
+    
+    res.json(formatted)
   } catch (error) {
     console.error('❌ Ошибка получения списка отчётов', error)
     res.status(500).json({ ok: false, message: 'Не удалось получить отчёты.' })
@@ -1683,7 +1873,23 @@ app.get('/api/reports/:sessionId', async (req, res) => {
     }
 
     const syncedRow = await maybeUpdateReportFromOpenAI(row)
-    res.json(syncedRow || row)
+    const finalRow = syncedRow || row
+    
+    // Форматируем report_text, если это JSON
+    if (finalRow.report_text) {
+      try {
+        // Пробуем распарсить как JSON
+        const parsed = JSON.parse(finalRow.report_text)
+        // Если это объект с полями отчета, форматируем его
+        if (parsed && typeof parsed === 'object' && (parsed.generatedAt || parsed.totals || parsed.revenue)) {
+          finalRow.report_text = formatReportAsText(parsed)
+        }
+      } catch {
+        // Если не JSON, оставляем как есть
+      }
+    }
+    
+    res.json(finalRow)
   } catch (error) {
     console.error('❌ Ошибка получения отчёта', error)
     res.status(500).json({ ok: false, message: 'Не удалось получить отчёт.' })
