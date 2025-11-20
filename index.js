@@ -906,7 +906,8 @@ const tryParseDate = (value) => {
   }
   
   const raw = value.toString().trim()
-  if (!raw || raw === 'null' || raw === 'undefined' || raw === 'NaN') return null
+  // Обработка Python None, который может прийти как строка "None" или "none"
+  if (!raw || raw === 'null' || raw === 'undefined' || raw === 'NaN' || raw.toLowerCase() === 'none') return null
   
   // Пробуем стандартный парсинг
   const direct = Date.parse(raw)
@@ -921,13 +922,72 @@ const tryParseDate = (value) => {
     const date = new Date(Date.UTC(year, month, 1))
     return Number.isNaN(date.getTime()) ? null : date
   }
+  // Формат с временем: dd.mm.yyyy HH:MM:SS или dd.mm.yyyy H:MM:SS (один цифровой час)
+  // Формат с временем: dd.mm.yyyy HH:MM:SS или mm.dd.yyyy HH:MM:SS (автоопределение)
+  const dotTimeMatch = raw.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})\s+(\d{1,2}):(\d{1,2}):(\d{1,2})$/)
+  if (dotTimeMatch) {
+    const [, part1, part2, yy, hh, min, ss] = dotTimeMatch
+    const num1 = Number(part1)
+    const num2 = Number(part2)
+    const year = yy.length === 2 ? Number(yy) + (Number(yy) > 70 ? 1900 : 2000) : Number(yy)
+    
+    // Автоопределение формата (аналогично формату без времени)
+    let day, month
+    if (num1 > 12) {
+      day = num1
+      month = num2 - 1
+    } else if (num2 > 12) {
+      day = num2
+      month = num1 - 1
+    } else {
+      // Стандарт для Казахстана: dd.mm.yyyy
+      day = num1
+      month = num2 - 1
+    }
+    
+    // Проверка валидности
+    if (day < 1 || day > 31 || month < 0 || month > 11) {
+      return null
+    }
+    
+    const hour = Number(hh)
+    const minute = Number(min)
+    const second = Number(ss)
+    const date = new Date(Date.UTC(year, month, day, hour, minute, second))
+    return Number.isNaN(date.getTime()) ? null : date
+  }
+  
+  // Формат без времени: dd.mm.yyyy или mm.dd.yyyy (автоопределение)
   const dotMatch = raw.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})$/)
   if (dotMatch) {
-    const [, dd, mm, yy] = dotMatch
-    const day = Number(dd)
-    const month = Number(mm) - 1
-    const year =
-      yy.length === 2 ? Number(yy) + (Number(yy) > 70 ? 1900 : 2000) : Number(yy)
+    const [, part1, part2, yy] = dotMatch
+    const num1 = Number(part1)
+    const num2 = Number(part2)
+    const year = yy.length === 2 ? Number(yy) + (Number(yy) > 70 ? 1900 : 2000) : Number(yy)
+    
+    // Автоопределение формата: если первое число > 12, то это день (dd.mm.yyyy)
+    // Если второе число > 12, то это месяц (mm.dd.yyyy), значит первое - день
+    // Иначе если первое <= 12 и второе <= 12 - используем формат dd.mm.yyyy (стандарт для Казахстана)
+    let day, month
+    if (num1 > 12) {
+      // Первое число > 12, значит это день, второе - месяц (dd.mm.yyyy)
+      day = num1
+      month = num2 - 1
+    } else if (num2 > 12) {
+      // Второе число > 12, значит это день, первое - месяц (mm.dd.yyyy)
+      day = num2
+      month = num1 - 1
+    } else {
+      // Оба числа <= 12, используем формат dd.mm.yyyy (стандарт для Казахстана)
+      day = num1
+      month = num2 - 1
+    }
+    
+    // Проверка валидности дня и месяца
+    if (day < 1 || day > 31 || month < 0 || month > 11) {
+      return null
+    }
+    
     const date = new Date(Date.UTC(year, month, day))
     return Number.isNaN(date.getTime()) ? null : date
   }
@@ -993,40 +1053,88 @@ const TRANSACTION_DATE_KEYS = [
 ]
 
 const extractTransactionDate = (transaction) => {
-  const value = getFieldValue(transaction, TRANSACTION_DATE_KEYS)
+  // Шаг 1: Пробуем найти дату по стандартным ключам (заголовкам колонок)
+  let value = getFieldValue(transaction, TRANSACTION_DATE_KEYS)
+  let parsed = value ? tryParseDate(value) : null
   
-  // Если не нашли по стандартным ключам, пробуем найти любое поле, похожее на дату
-  if (!value && transaction && typeof transaction === 'object') {
-    // Ищем поле, которое может быть датой - проверяем все строковые поля
+  if (parsed) {
+    return parsed
+  }
+  
+  // Шаг 2: Если не нашли по стандартным ключам, ищем паттерн дд.мм.гггг во всех полях строки
+  // Это важно, так как дата может быть в любом поле или смешана с другим текстом
+  if (transaction && typeof transaction === 'object') {
+    // Проверяем, есть ли кредит > 0 (если есть, то это реальная транзакция и нужно искать дату агрессивно)
+    const hasCredit = parseAmountNumber(extractAmountRaw(transaction)) > 0
+    
+    // Паттерн для поиска даты в формате дд.мм.гггг (с точками, слэшами или дефисами)
+    // Может быть с временем или без
+    const datePattern = /(\d{1,2}[./-]\d{1,2}[./-]\d{2,4}(?:\s+\d{1,2}:\d{1,2}(?::\d{1,2})?)?)/g
+    
+    // Проверяем все поля транзакции
     for (const [key, val] of Object.entries(transaction)) {
+      // Пропускаем служебные поля
+      if (key.startsWith('_ikap_') || key === 'page_number' || key === 'bank_name') {
+        continue
+      }
+      
       if (val && typeof val === 'string') {
         const trimmed = val.trim()
-        // Проверяем, похоже ли значение на дату (содержит цифры и разделители)
-        if (trimmed && /^\d{1,2}[./-]\d{1,2}[./-]\d{2,4}/.test(trimmed)) {
-          const parsed = tryParseDate(trimmed)
-          if (parsed) {
-            console.log(`📅 Найдена дата в поле "${key}": "${trimmed}" -> ${parsed.toISOString()}`)
-            return parsed
+        if (!trimmed || trimmed.toLowerCase() === 'none') continue
+        
+        // Ищем все вхождения паттерна даты в тексте поля
+        const matches = Array.from(trimmed.matchAll(datePattern))
+        for (const match of matches) {
+          let dateStr = match[0].trim()
+          
+          // Убираем лишние символы в конце (например, если после времени идет текст)
+          // Оставляем только дату и время (если есть)
+          dateStr = dateStr.replace(/\s+[^\d:]+$/, '').trim()
+          
+          const parsedDate = tryParseDate(dateStr)
+          if (parsedDate && !Number.isNaN(parsedDate.getTime())) {
+            // Проверяем, что дата разумная (не слишком старая и не слишком далеко в будущем)
+            const currentYear = new Date().getUTCFullYear()
+            const dateYear = parsedDate.getUTCFullYear()
+            // Разрешаем даты от 2000 до текущий год + 2
+            if (dateYear >= 2000 && dateYear <= currentYear + 2) {
+              if (hasCredit) {
+                console.log(`📅 Найдена дата в поле "${key}" (транзакция с кредитом): "${dateStr}" -> ${parsedDate.toISOString()}`)
+              }
+              return parsedDate
+            }
+          }
+        }
+      } else if (val && typeof val === 'number') {
+        // Также проверяем числа - возможно это Excel serial date
+        const parsedDate = tryParseDate(val)
+        if (parsedDate && !Number.isNaN(parsedDate.getTime())) {
+          const currentYear = new Date().getUTCFullYear()
+          const dateYear = parsedDate.getUTCFullYear()
+          if (dateYear >= 2000 && dateYear <= currentYear + 2) {
+            if (hasCredit) {
+              console.log(`📅 Найдена дата (число) в поле "${key}" (транзакция с кредитом): ${val} -> ${parsedDate.toISOString()}`)
+            }
+            return parsedDate
           }
         }
       }
     }
   }
   
-  const parsed = tryParseDate(value)
-  
-  // Логируем, если не удалось распарсить дату (только первые несколько раз, чтобы не засорять логи)
-  if (!parsed && value) {
+  // Шаг 3: Если нашли значение по ключам, но не смогли распарсить - логируем
+  if (!parsed && value && value.toLowerCase() !== 'none') {
     if (typeof transaction === 'object' && transaction._ikap_date_warning_count === undefined) {
       transaction._ikap_date_warning_count = 1
-      console.warn(`⚠️ Не удалось распарсить дату из значения: "${value}"`, {
+      const hasCredit = parseAmountNumber(extractAmountRaw(transaction)) > 0
+      console.warn(`⚠️ Не удалось распарсить дату из значения: "${value}" (транзакция ${hasCredit ? 'с кредитом' : 'без кредита'})`, {
         availableKeys: Object.keys(transaction).filter(k => k !== '_ikap_date_warning_count'),
         transactionSample: Object.fromEntries(Object.entries(transaction).slice(0, 5))
       })
     }
   }
   
-  return parsed
+  return parsed || null
 }
 
 const formatCurrencyKzt = (amount) => {
@@ -1170,17 +1278,22 @@ const aggregateByYearMonth = (transactions = []) => {
       continue
     }
     
-    // Проверяем, что дата не в будущем (более чем на 1 день от текущей даты)
+    // Проверяем, что дата не в будущем (более чем на 3 дня от текущей даты)
     // Это защита от неправильного парсинга дат
+    // Реальные банковские транзакции не могут быть в будущем более чем на несколько дней
     const currentDate = new Date()
     const maxAllowedDate = new Date(currentDate)
-    maxAllowedDate.setDate(maxAllowedDate.getDate() + 1) // Разрешаем до завтра (на случай часовых поясов)
+    maxAllowedDate.setDate(maxAllowedDate.getDate() + 3) // Разрешаем только до 3 дней в будущем (на случай часовых поясов и обработки)
     if (date > maxAllowedDate) {
-      // Дата в будущем - пропускаем эту транзакцию при группировке
+      // Дата слишком далеко в будущем - вероятно ошибка парсинга, пропускаем при группировке
       console.warn('⚠️ Транзакция с датой в будущем пропущена при группировке:', {
         date: date.toISOString(),
+        dateFormatted: `${date.getUTCDate()}.${date.getUTCMonth() + 1}.${date.getUTCFullYear()}`,
+        currentDate: currentDate.toISOString(),
+        currentDateFormatted: `${currentDate.getUTCDate()}.${currentDate.getUTCMonth() + 1}.${currentDate.getUTCFullYear()}`,
         amount,
         purpose: extractPurpose(transaction),
+        originalDateValue: getFieldValue(transaction, TRANSACTION_DATE_KEYS),
       })
       continue
     }
@@ -1282,8 +1395,7 @@ const buildStructuredSummary = ({
   const revenueSummary = aggregateByYearMonth(revenueTransactions)
   const nonRevenueSummary = aggregateByYearMonth(nonRevenueTransactions)
   
-  // Общая сумма вычисляется из ВСЕХ транзакций (включая те без дат)
-  // Это важно для корректности итогов
+  // Общая сумма вычисляется из ВСЕХ транзакций (включая те без дат и в будущем)
   const totalRevenue = revenueTransactions.reduce((sum, transaction) => {
     const amount = parseAmountNumber(extractAmountRaw(transaction))
     return sum + (amount || 0)
@@ -1292,6 +1404,28 @@ const buildStructuredSummary = ({
     const amount = parseAmountNumber(extractAmountRaw(transaction))
     return sum + (amount || 0)
   }, 0)
+  
+  // Сумма по годам (из группировки) - для проверки совпадения с общей суммой
+  const revenueSummaryTotal = revenueSummary.reduce((sum, year) => sum + year.value, 0)
+  const nonRevenueSummaryTotal = nonRevenueSummary.reduce((sum, year) => sum + year.value, 0)
+  
+  // Если есть разница между общей суммой и суммой по годам - логируем для отладки
+  const revenueDifference = totalRevenue - revenueSummaryTotal
+  const nonRevenueDifference = totalNonRevenue - nonRevenueSummaryTotal
+  if (revenueDifference > 0.01 || nonRevenueDifference > 0.01) {
+    console.log('📊 Разница между общей суммой и суммой по годам:', {
+      revenue: {
+        total: totalRevenue,
+        byYears: revenueSummaryTotal,
+        difference: revenueDifference,
+      },
+      nonRevenue: {
+        total: totalNonRevenue,
+        byYears: nonRevenueSummaryTotal,
+        difference: nonRevenueDifference,
+      },
+    })
+  }
   
   const trailing = computeTrailing12Months(revenueTransactions)
 
@@ -2014,8 +2148,35 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
           }
         }
 
+        // Объединяем транзакции и сортируем по датам (от старых к новым)
         const finalRevenueTransactions = [...obviousRevenue, ...reviewedRevenue]
+          .sort((a, b) => {
+            const dateA = extractTransactionDate(a)
+            const dateB = extractTransactionDate(b)
+            if (!dateA && !dateB) return 0
+            if (!dateA) return 1 // Транзакции без дат в конец
+            if (!dateB) return -1
+            return dateA.getTime() - dateB.getTime()
+          })
         const finalNonRevenueTransactions = reviewedNonRevenue
+          .sort((a, b) => {
+            const dateA = extractTransactionDate(a)
+            const dateB = extractTransactionDate(b)
+            if (!dateA && !dateB) return 0
+            if (!dateA) return 1 // Транзакции без дат в конец
+            if (!dateB) return -1
+            return dateA.getTime() - dateB.getTime()
+          })
+
+        // Создаем preview из отсортированных данных
+        const sortedObviousRevenue = [...obviousRevenue].sort((a, b) => {
+          const dateA = extractTransactionDate(a)
+          const dateB = extractTransactionDate(b)
+          if (!dateA && !dateB) return 0
+          if (!dateA) return 1 // Транзакции без дат в конец
+          if (!dateB) return -1
+          return dateA.getTime() - dateB.getTime()
+        })
 
         const structuredSummary = buildStructuredSummary({
           revenueTransactions: finalRevenueTransactions,
@@ -2025,7 +2186,7 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
             agentDecisions: decisionsMap.size,
             unresolved: Math.max(0, needsReview.length - decisionsMap.size),
           },
-          autoRevenuePreview: buildTransactionsPreview(obviousRevenue, { limit: 10000 }), // Показываем все операции (увеличен лимит до 10000)
+          autoRevenuePreview: buildTransactionsPreview(sortedObviousRevenue, { limit: 10000 }), // Показываем все операции отсортированные по датам
           convertedExcels,
         })
 

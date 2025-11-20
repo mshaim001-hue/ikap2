@@ -1024,7 +1024,7 @@ class PDFStatementProcessor:
             sheet_names = wb.sheetnames
             print(f"[PDF_PROCESSOR] Найдено листов в Excel: {len(sheet_names)}", file=sys.stderr, flush=True)
             excel_file.seek(0)  # Сбрасываем позицию для чтения через pandas
-            
+
             # ШАГ 2: Извлекаем метаданные из PDF (опционально, если pdfplumber доступен)
             if pdfplumber is not None:
                 try:
@@ -1052,7 +1052,7 @@ class PDFStatementProcessor:
                         continue
                     
                     _log_debug(f"[DEBUG] Начинаю обработку листа '{sheet_name}': {len(excel_df)} строк, {len(excel_df.columns)} колонок")
-                    _log_debug(f"[DEBUG] Колонки: {list(excel_df.columns)}")
+                _log_debug(f"[DEBUG] Колонки: {list(excel_df.columns)}")
                     
                     # Обрабатываем лист - ищем все повторяющиеся заголовки и разбиваем на секции
                     # Это важно для выписок, где на каждой странице PDF есть заголовки столбцов
@@ -1063,12 +1063,12 @@ class PDFStatementProcessor:
                     )
                     
                     for processed in processed_tables:
-                        if processed:
-                            tables.append(processed)
-                            import sys
+                    if processed:
+                        tables.append(processed)
+                        import sys
                             print(f"[INFO] Извлечено {len(processed.rows)} строк с кредитом с листа '{sheet_name}'", file=sys.stderr, flush=True)
-                        else:
-                            import sys
+                    else:
+                        import sys
                             print(f"[WARNING] Не удалось обработать часть листа '{sheet_name}': processed вернул None", file=sys.stderr, flush=True)
                             
                 except Exception as e:
