@@ -14,9 +14,10 @@ import {
   Inbox,
   Trash2,
   X,
+  Power,
 } from 'lucide-react'
 import './App.css'
-import { analyzeStatements, fetchReportBySession, fetchReportsList, deleteReport } from './api/analysis'
+import { analyzeStatements, fetchReportBySession, fetchReportsList, deleteReport, wakeUpServer } from './api/analysis'
 
 const MAX_FILE_SIZE = 50 * 1024 * 1024 // 50 MB
 
@@ -91,6 +92,9 @@ const UploadPanel = ({
   onSubmit,
   isSubmitting,
   error,
+  isWakingUp,
+  onWakeUp,
+  isWakingUpDisabled,
 }) => {
   const canSubmit = files.length > 0
 
@@ -110,16 +114,39 @@ const UploadPanel = ({
           </div>
         )}
 
-        <label className="file-input-label">
+        {/* Кнопка пробуждения сервера */}
+        <div className="wake-up-section">
+          <button
+            type="button"
+            className="secondary-button wake-up-button"
+            onClick={onWakeUp}
+            disabled={isWakingUp || isWakingUpDisabled || isSubmitting}
+          >
+            {isWakingUp ? <Loader2 size={16} className="spin" /> : <Power size={16} />}
+            {isWakingUp ? 'Пробуждаем сервер...' : 'Разбудить сервер'}
+          </button>
+          {isWakingUp && (
+            <p className="wake-up-hint">
+              Сервер пробуждается, подождите 10 секунд перед загрузкой файлов
+            </p>
+          )}
+        </div>
+
+        <label className="file-input-label" style={{ opacity: isWakingUp ? 0.6 : 1 }}>
           <input
             type="file"
             multiple
             accept=".pdf,application/pdf,.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             onChange={(event) => {
+              if (isWakingUp) {
+                event.target.value = ''
+                return
+              }
               const selected = Array.from(event.target.files || [])
               onFilesChange(selected)
               event.target.value = ''
             }}
+            disabled={isWakingUp}
           />
           <Paperclip size={18} />
           <span>Прикрепить файлы</span>
@@ -165,7 +192,7 @@ const UploadPanel = ({
           type="button"
           className="primary-button"
           onClick={onSubmit}
-          disabled={!canSubmit || isSubmitting}
+          disabled={!canSubmit || isSubmitting || isWakingUp}
         >
           {isSubmitting ? <Loader2 size={18} className="spin" /> : <Send size={18} />}
           {isSubmitting ? 'Отправляем...' : 'Отправить на анализ'}
@@ -605,6 +632,8 @@ function App() {
   const reloadTimerRef = useRef(null)
   const [toast, setToast] = useState(null)
   const toastTimerRef = useRef(null)
+  const [isWakingUp, setIsWakingUp] = useState(false)
+  const wakeUpTimerRef = useRef(null)
 
   const reportsQuery = useQuery({
     queryKey: ['reports'],
@@ -712,8 +741,49 @@ function App() {
       if (toastTimerRef.current) {
         clearTimeout(toastTimerRef.current)
       }
+      if (wakeUpTimerRef.current) {
+        clearTimeout(wakeUpTimerRef.current)
+      }
     }
   }, [])
+
+  const handleWakeUpServer = async () => {
+    if (isWakingUp) return
+    
+    setIsWakingUp(true)
+    
+    try {
+      // Отправляем запрос на пробуждение
+      await wakeUpServer()
+      
+      // Показываем спиннер на 10 секунд
+      wakeUpTimerRef.current = setTimeout(() => {
+        setIsWakingUp(false)
+        wakeUpTimerRef.current = null
+        
+        // Показываем уведомление об успехе
+        if (toastTimerRef.current) {
+          clearTimeout(toastTimerRef.current)
+        }
+        setToast({
+          type: 'info',
+          text: 'Сервер готов к работе. Можете загружать файлы.',
+        })
+        toastTimerRef.current = setTimeout(() => {
+          setToast(null)
+          toastTimerRef.current = null
+        }, 5000)
+      }, 10000) // 10 секунд
+    } catch (error) {
+      console.error('❌ Ошибка пробуждения сервера:', error)
+      // Даже при ошибке показываем спиннер 10 секунд
+      // (сервер может начать просыпаться даже при ошибке)
+      wakeUpTimerRef.current = setTimeout(() => {
+        setIsWakingUp(false)
+        wakeUpTimerRef.current = null
+      }, 10000)
+    }
+  }
 
   const handleFilesChange = (selectedFiles) => {
     const oversized = selectedFiles.find((file) => file.size > MAX_FILE_SIZE)
@@ -830,6 +900,9 @@ function App() {
             onSubmit={handleSubmit}
             isSubmitting={analyzeMutation.isLoading || forceSpinner}
             error={submitError}
+            isWakingUp={isWakingUp}
+            onWakeUp={handleWakeUpServer}
+            isWakingUpDisabled={false}
           />
         </div>
 

@@ -488,6 +488,100 @@ class PDFStatementProcessor:
         compact = re.sub(r"[^\d]", "", header)
         return bool(compact) and compact == re.sub(r"[^\d]", "", header)
 
+    def _process_dataframe_with_repeated_headers(
+        self,
+        dataframe: pd.DataFrame,
+        page_number: int,
+        bank_name: Optional[str],
+    ) -> List[Optional[ProcessedTable]]:
+        """
+        Обрабатывает DataFrame, разделяя его на части по повторяющимся заголовкам.
+        Возвращает список обработанных таблиц (одну для каждой секции с заголовком).
+        """
+        if dataframe.empty:
+            return []
+        
+        results: List[Optional[ProcessedTable]] = []
+        fallback_columns: Optional[List[str]] = None
+        
+        # Ищем все строки, которые выглядят как заголовки во ВСЕМ DataFrame
+        # Это важно для длинных выписок, где заголовки повторяются на каждой странице
+        header_indices = []
+        
+        # Проверяем все строки DataFrame для поиска повторяющихся заголовков
+        for idx in range(len(dataframe)):
+            row = dataframe.iloc[idx].fillna("").astype(str)
+            if idx + 1 < len(dataframe):
+                next_row = dataframe.iloc[idx + 1].fillna("").astype(str)
+            else:
+                next_row = None
+            
+            if self._looks_like_table_header(row, next_row):
+                # Проверяем, что это не просто случайное совпадение
+                normalized = [self._normalize_header(str(cell)) for cell in row]
+                has_credit = any(
+                    any(header in cell for header in self.credit_headers | self.debit_headers)
+                    for cell in normalized
+                )
+                if has_credit:
+                    # Проверяем, что это не дубликат предыдущего заголовка (похожая структура)
+                    # Если предыдущий заголовок был недавно (в пределах 5 строк), это может быть дубликат
+                    is_duplicate = False
+                    if header_indices:
+                        last_header_idx = header_indices[-1]
+                        if idx - last_header_idx < 5:
+                            # Сравниваем содержимое заголовков
+                            last_header_row = dataframe.iloc[last_header_idx].fillna("").astype(str)
+                            last_normalized = [self._normalize_header(str(cell)) for cell in last_header_row]
+                            # Если заголовки очень похожи - это дубликат
+                            if len(set(normalized) & set(last_normalized)) >= 3:
+                                is_duplicate = True
+                    
+                    if not is_duplicate:
+                        header_indices.append(idx)
+        
+        _log_debug(f"[DEBUG] Найдено заголовков в листе: {len(header_indices)} (индексы: {header_indices[:20]}...)" if len(header_indices) > 20 else f"[DEBUG] Найдено заголовков в листе: {len(header_indices)} (индексы: {header_indices})")
+        
+        # Если найдено несколько заголовков, разбиваем DataFrame на части
+        # Каждая секция будет обработана с правильными заголовками
+        if len(header_indices) > 1:
+            _log_debug(f"[DEBUG] Найдено {len(header_indices)} заголовков, разбиваю DataFrame на {len(header_indices)} секций")
+            for i, header_idx in enumerate(header_indices):
+                start_idx = header_idx
+                # Берем все строки до следующего заголовка или до конца
+                if i + 1 < len(header_indices):
+                    end_idx = header_indices[i + 1]
+                else:
+                    end_idx = len(dataframe)
+                
+                section_df = dataframe.iloc[start_idx:end_idx].copy().reset_index(drop=True)
+                _log_debug(f"[DEBUG] Обрабатываю секцию {i+1}/{len(header_indices)}: строки {start_idx}-{end_idx} (размер секции: {len(section_df)} строк)")
+                
+                processed, fallback_columns = self._process_dataframe(
+                    section_df, 
+                    page_number=page_number, 
+                    bank_name=bank_name, 
+                    fallback_columns=fallback_columns
+                )
+                
+                if processed:
+                    results.append(processed)
+                    _log_debug(f"[DEBUG] Секция {i+1} обработана: найдено {len(processed.rows)} строк с кредитом")
+        else:
+            # Заголовок один или не найден - обрабатываем весь DataFrame
+            # Это нормально для банков, где заголовок только в начале выписки
+            _log_debug(f"[DEBUG] Заголовок один ({len(header_indices)}) или не найден - обрабатываю весь DataFrame как одну секцию")
+            processed, _ = self._process_dataframe(
+                dataframe, 
+                page_number=page_number, 
+                bank_name=bank_name, 
+                fallback_columns=fallback_columns
+            )
+            if processed:
+                results.append(processed)
+        
+        return results
+    
     def _process_dataframe(
         self,
         dataframe: pd.DataFrame,
@@ -923,10 +1017,14 @@ class PDFStatementProcessor:
             # Конвертируем Excel байты в DataFrame для обработки
             print(f"[PDF_PROCESSOR] Чтение Excel файла в DataFrame...", file=sys.stderr, flush=True)
             excel_file = io.BytesIO(excel_bytes)
-            excel_df = pd.read_excel(excel_file, sheet_name=0, engine="openpyxl")
-            print(f"[PDF_PROCESSOR] ✅ Excel файл прочитан: {len(excel_df)} строк, {len(excel_df.columns)} колонок", file=sys.stderr, flush=True)
-            print(f"[PDF_PROCESSOR] Колонки в Excel: {list(excel_df.columns)}", file=sys.stderr, flush=True)
-
+            
+            # Читаем все листы из Excel файла
+            from openpyxl import load_workbook
+            wb = load_workbook(excel_file, data_only=True)
+            sheet_names = wb.sheetnames
+            print(f"[PDF_PROCESSOR] Найдено листов в Excel: {len(sheet_names)}", file=sys.stderr, flush=True)
+            excel_file.seek(0)  # Сбрасываем позицию для чтения через pandas
+            
             # ШАГ 2: Извлекаем метаданные из PDF (опционально, если pdfplumber доступен)
             if pdfplumber is not None:
                 try:
@@ -942,27 +1040,44 @@ class PDFStatementProcessor:
             metadata.setdefault("bank_name", bank_name or "")
             metadata["extraction_method"] = "adobe_pdf_services_api"
 
-            # ШАГ 3: Обрабатываем Excel DataFrame для извлечения строк с кредитом
-            if not excel_df.empty:
-                _log_debug(f"[DEBUG] Начинаю обработку DataFrame: {len(excel_df)} строк, {len(excel_df.columns)} колонок")
-                _log_debug(f"[DEBUG] Колонки: {list(excel_df.columns)}")
+            # ШАГ 3: Обрабатываем каждый лист Excel отдельно
+            for sheet_idx, sheet_name in enumerate(sheet_names):
+                excel_file.seek(0)  # Сбрасываем позицию для каждого листа
                 try:
-                    processed, _ = self._process_dataframe(
-                        excel_df, page_number=1, bank_name=bank_name, fallback_columns=None
+                    excel_df = pd.read_excel(excel_file, sheet_name=sheet_name, engine="openpyxl")
+                    print(f"[PDF_PROCESSOR] ✅ Лист '{sheet_name}' прочитан: {len(excel_df)} строк, {len(excel_df.columns)} колонок", file=sys.stderr, flush=True)
+                    
+                    if excel_df.empty:
+                        print(f"[PDF_PROCESSOR] Лист '{sheet_name}' пустой, пропускаем", file=sys.stderr, flush=True)
+                        continue
+                    
+                    _log_debug(f"[DEBUG] Начинаю обработку листа '{sheet_name}': {len(excel_df)} строк, {len(excel_df.columns)} колонок")
+                    _log_debug(f"[DEBUG] Колонки: {list(excel_df.columns)}")
+                    
+                    # Обрабатываем лист - ищем все повторяющиеся заголовки и разбиваем на секции
+                    # Это важно для выписок, где на каждой странице PDF есть заголовки столбцов
+                    processed_tables = self._process_dataframe_with_repeated_headers(
+                        excel_df, 
+                        page_number=sheet_idx + 1, 
+                        bank_name=bank_name
                     )
-                    if processed:
-                        tables.append(processed)
-                        import sys
-                        print(f"[INFO] Извлечено {len(processed.rows)} строк с кредитом", file=sys.stderr, flush=True)
-                    else:
-                        import sys
-                        print(f"[WARNING] Не удалось обработать таблицу из Excel: processed вернул None", file=sys.stderr, flush=True)
+                    
+                    for processed in processed_tables:
+                        if processed:
+                            tables.append(processed)
+                            import sys
+                            print(f"[INFO] Извлечено {len(processed.rows)} строк с кредитом с листа '{sheet_name}'", file=sys.stderr, flush=True)
+                        else:
+                            import sys
+                            print(f"[WARNING] Не удалось обработать часть листа '{sheet_name}': processed вернул None", file=sys.stderr, flush=True)
+                            
                 except Exception as e:
                     import sys
-                    print(f"[ERROR] Ошибка при обработке DataFrame: {e}", file=sys.stderr, flush=True)
+                    print(f"[ERROR] Ошибка при обработке листа '{sheet_name}': {e}", file=sys.stderr, flush=True)
                     import traceback
                     print(f"[ERROR] Traceback: {traceback.format_exc()}", file=sys.stderr, flush=True)
-                    raise
+                    # Продолжаем обработку остальных листов даже если один упал
+                    continue
 
         except Exception as e:
             import sys

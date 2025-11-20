@@ -78,3 +78,19 @@ export const deleteReport = async (sessionId) => {
   return true
 }
 
+export const wakeUpServer = async () => {
+  // Отправляем запрос на /ping для "пробуждения" сервера
+  // (если сервер "спит" на Render.com или другом хостинге)
+  try {
+    await apiFetch('/ping', {
+      method: 'GET',
+      timeout: 15000, // 15 секунд таймаут для холодного старта
+    })
+    return true
+  } catch (error) {
+    // Даже если запрос упал, сервер может начать просыпаться
+    console.warn('⚠️ Ошибка пробуждения сервера:', error)
+    return false
+  }
+}
+
