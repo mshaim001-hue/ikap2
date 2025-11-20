@@ -909,9 +909,7 @@ const tryParseDate = (value) => {
   // Обработка Python None, который может прийти как строка "None" или "none"
   if (!raw || raw === 'null' || raw === 'undefined' || raw === 'NaN' || raw.toLowerCase() === 'none') return null
   
-  // Пробуем стандартный парсинг
-  const direct = Date.parse(raw)
-  if (!Number.isNaN(direct)) return new Date(direct)
+  // ВАЖНО: Сначала обрабатываем явные форматы DD.MM.YYYY, чтобы избежать неправильной интерпретации Date.parse()
   // Обработка неполных дат вида .01.2025 или .1.2025 (без дня, только месяц.год)
   const incompleteDotMatch = raw.match(/^\.(\d{1,2})\.(\d{2,4})$/)
   if (incompleteDotMatch) {
@@ -922,6 +920,7 @@ const tryParseDate = (value) => {
     const date = new Date(Date.UTC(year, month, 1))
     return Number.isNaN(date.getTime()) ? null : date
   }
+  
   // Формат с временем: dd.mm.yyyy HH:MM:SS или dd.mm.yyyy H:MM:SS
   // В выписках всегда используется формат ДД.ММ.ГГГГ (день.месяц.год)
   const dotTimeMatch = raw.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})\s+(\d{1,2}):(\d{1,2}):(\d{1,2})$/)
@@ -960,14 +959,34 @@ const tryParseDate = (value) => {
     const date = new Date(Date.UTC(year, month, day))
     return Number.isNaN(date.getTime()) ? null : date
   }
+  
+  // Только после обработки явных форматов пробуем стандартный парсинг (для ISO дат и других однозначных форматов)
+  // Date.parse() может неправильно интерпретировать даты в формате DD.MM.YYYY, поэтому мы обрабатываем их выше
+  const direct = Date.parse(raw)
+  if (!Number.isNaN(direct)) {
+    // Проверяем, что это не была дата в формате с точками/дефисами, которую мы могли пропустить
+    // Если это ISO формат (YYYY-MM-DD) или другой однозначный формат, используем его
+    if (raw.match(/^\d{4}-\d{2}-\d{2}/) || raw.match(/^\d{4}\/\d{2}\/\d{2}/)) {
+      return new Date(direct)
+    }
+    // Для других форматов также используем, но только если это не формат с точками
+    // (форматы с точками уже обработаны выше)
+    if (!raw.match(/^\d{1,2}[./-]\d{1,2}[./-]\d{2,4}/)) {
+      return new Date(direct)
+    }
+  }
   const monthWords = {
     января: 0,
     февраль: 1,
     февраля: 1,
+    февр: 1,
+    фев: 1,
     март: 2,
     марта: 2,
+    мар: 2,
     апрель: 3,
     апреля: 3,
+    апр: 3,
     май: 4,
     мая: 4,
     июнь: 5,
@@ -976,21 +995,30 @@ const tryParseDate = (value) => {
     июля: 6,
     август: 7,
     августа: 7,
+    авг: 7,
     сентябрь: 8,
     сентября: 8,
+    сент: 8,
     октябрь: 9,
     октября: 9,
+    окт: 9,
     ноябрь: 10,
     ноября: 10,
+    нояб: 10,
     декабрь: 11,
     декабря: 11,
+    дек: 11,
   }
+  // Парсинг дат с названиями месяцев: "11 нояб. 2025 г." или "11 октября 2025"
+  // Поддерживаем как полные, так и сокращенные названия месяцев
   const wordMatch = raw
     .toLowerCase()
-    .match(/^(\d{1,2})\s+([а-яa-z]+)\s+(\d{2,4})$/i)
+    .match(/^(\d{1,2})\s+([а-яa-z]+)\.?\s+(\d{2,4})\s*(?:г\.?)?$/i)
   if (wordMatch) {
     const [, dd, monthWord, yy] = wordMatch
-    const month = monthWords[monthWord]
+    // Убираем точку в конце, если есть (для "нояб." -> "нояб")
+    const cleanMonthWord = monthWord.replace(/\.$/, '')
+    const month = monthWords[cleanMonthWord]
     if (month !== undefined) {
       const day = Number(dd)
       const year =
