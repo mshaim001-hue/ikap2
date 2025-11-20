@@ -580,7 +580,8 @@ const transactionClassifierInstructions = `Ты финансовый анали�
 1. Для каждой операции верни признак \`is_revenue\` (true/false) и короткое объяснение \`reason\`.
 2. Считай выручкой платежи клиентов за товары/услуги или их прямые аналоги ("оплата", "реализация", "invoice", "services", "goods", "договор поставки", "СФ", "счет-фактура", "акт оказанных услуг" и т.п.).
 3. НЕ относись к выручке:
-   - Явные возвраты ("возврат средств", "возврат за непредоставленные", "refund")
+   - КРИТИЧЕСКИ ВАЖНО: Если в назначении платежа есть слова "возврат" или "возмещение" — это точно НЕ выручка (даже если есть другие маркеры выручки)
+   - Явные возвраты ("возврат средств", "возврат за непредоставленные", "refund", "возмещение")
    - Переводы между собственными счетами одной компании (если видно по БИН/ИИН или названию)
    - Займы/кредиты, инвестиции, субсидии, депозиты, дивиденды, зарплаты, налоги, штрафы
    - Безвозмездная помощь, материальная помощь
@@ -616,7 +617,7 @@ const createTransactionClassifierAgent = () => {
   return new Agent({
     name: 'Revenue Classifier',
     instructions: transactionClassifierInstructions,
-    model: 'gpt-5-mini',
+    model: 'gpt-5.1',
     modelSettings: { store: true },
   })
 }
@@ -692,9 +693,11 @@ const NON_REVENUE_KEYWORDS = [
   'кредит',
   'loan',
   'return',
+  'возврат',
   'возврат средств',
   'возврат денежных средств',
   'возврат за непредоставленные',
+  'возмещение',
   'между своими',
   'депозит',
   'вклад',
@@ -1153,6 +1156,12 @@ const classifyTransactionHeuristically = (transaction) => {
   
   const contains = (keywords, text) => keywords.some((keyword) => text.includes(keyword))
   
+  // ПРИОРИТЕТНАЯ проверка: если в назначении платежа есть слова "возврат" или "возмещение" - это точно не выручка
+  const returnKeywords = ['возврат', 'возмещение']
+  if (contains(returnKeywords, purpose)) {
+    return { type: 'non_revenue', reason: 'обнаружены слова "возврат" или "возмещение" в назначении платежа' }
+  }
+  
   // Сначала проверяем явные маркеры невыручки в назначении ИЛИ отправителе
   // Пополнение через терминал/банкомат (cash in) - это НЕ выручка
   const terminalMarkers = [
@@ -1204,6 +1213,7 @@ const attachInternalTransactionIds = (transactions = [], sessionId) =>
 
 const splitTransactionsByConfidence = (transactions = []) => {
   const obviousRevenue = []
+  const obviousNonRevenue = []
   const needsReview = []
 
   for (const transaction of transactions) {
@@ -1216,15 +1226,25 @@ const splitTransactionsByConfidence = (transactions = []) => {
       })
       continue
     }
+    // Если это явная невыручка (например, с "возврат" или "возмещение"), не отправляем агенту
+    if (classification.type === 'non_revenue') {
+      obviousNonRevenue.push({
+        ...transaction,
+        _ikap_classification_source: 'heuristic',
+        _ikap_classification_reason: classification.reason,
+        _ikap_is_revenue: false,
+      })
+      continue
+    }
+    // Только неоднозначные транзакции отправляем агенту
     needsReview.push({
       ...transaction,
       _ikap_classification_source: 'agent_required',
       _ikap_classification_reason: classification.reason,
-      _ikap_possible_non_revenue: classification.type === 'non_revenue',
     })
   }
 
-  return { obviousRevenue, needsReview }
+  return { obviousRevenue, obviousNonRevenue, needsReview }
 }
 
 const buildClassifierPrompt = (transactions) => {
@@ -1736,10 +1756,22 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
 
   if (!files.length) {
     console.error('❌ Запрос без файлов, возвращаем 400')
+    activeAnalysisSessions.delete(sessionId)
     return res.status(400).json({
       ok: false,
       code: 'FILES_REQUIRED',
       message: 'Необходимо прикрепить хотя бы один файл для анализа.',
+    })
+  }
+
+  // Проверка комментария: комментарий обязателен
+  if (!comment || comment.length === 0) {
+    console.error('❌ Запрос без комментария, возвращаем 400')
+    activeAnalysisSessions.delete(sessionId)
+    return res.status(400).json({
+      ok: false,
+      code: 'COMMENT_REQUIRED',
+      message: 'Укажите важные данные',
     })
   }
 
@@ -2001,10 +2033,11 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
       ? extractedTransactions
       : []
 
-    const { obviousRevenue, needsReview } = splitTransactionsByConfidence(transactionsWithIds)
+    const { obviousRevenue, obviousNonRevenue, needsReview } = splitTransactionsByConfidence(transactionsWithIds)
     const classificationStats = {
       totalTransactions: transactionsWithIds.length,
       autoRevenue: obviousRevenue.length,
+      autoNonRevenue: obviousNonRevenue.length,
       agentReviewed: needsReview.length,
     }
 
@@ -2146,7 +2179,8 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
         }
 
         // Объединяем транзакции и сортируем по датам (от старых к новым)
-        const finalRevenueTransactions = [...obviousRevenue, ...reviewedRevenue]
+        // obviousNonRevenue уже классифицированы как невыручка (например, с "возврат" или "возмещение")
+        const finalNonRevenueTransactions = [...obviousNonRevenue, ...reviewedNonRevenue]
           .sort((a, b) => {
             const dateA = extractTransactionDate(a)
             const dateB = extractTransactionDate(b)
@@ -2155,7 +2189,7 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
             if (!dateB) return -1
             return dateA.getTime() - dateB.getTime()
           })
-        const finalNonRevenueTransactions = reviewedNonRevenue
+        const finalRevenueTransactions = [...obviousRevenue, ...reviewedRevenue]
           .sort((a, b) => {
             const dateA = extractTransactionDate(a)
             const dateB = extractTransactionDate(b)
@@ -2210,6 +2244,7 @@ app.post('/api/analysis', upload.array('files'), async (req, res) => {
           durationMs: Date.now() - startedAt.getTime(),
           totalTransactions: transactionsWithIds.length,
           autoRevenue: obviousRevenue.length,
+          autoNonRevenue: obviousNonRevenue.length,
           reviewedByAgent: needsReview.length,
           agentDecisions: decisionsMap.size,
         })

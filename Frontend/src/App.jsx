@@ -709,6 +709,11 @@ function App() {
         clearTimeout(reloadTimerRef.current)
         reloadTimerRef.current = null
       }
+      if (toastTimerRef.current) {
+        clearTimeout(toastTimerRef.current)
+        toastTimerRef.current = null
+      }
+      setToast(null)
     },
   })
 
@@ -805,6 +810,10 @@ function App() {
     if (forceSpinner) return
     if (files.length === 0) {
       setSubmitError('Добавьте хотя бы один файл для анализа.')
+      return
+    }
+    if (!comment || comment.trim().length === 0) {
+      setSubmitError('Укажите важные данные')
       return
     }
     setSubmitError('')
