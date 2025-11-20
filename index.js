@@ -922,28 +922,14 @@ const tryParseDate = (value) => {
     const date = new Date(Date.UTC(year, month, 1))
     return Number.isNaN(date.getTime()) ? null : date
   }
-  // Формат с временем: dd.mm.yyyy HH:MM:SS или dd.mm.yyyy H:MM:SS (один цифровой час)
-  // Формат с временем: dd.mm.yyyy HH:MM:SS или mm.dd.yyyy HH:MM:SS (автоопределение)
+  // Формат с временем: dd.mm.yyyy HH:MM:SS или dd.mm.yyyy H:MM:SS
+  // В выписках всегда используется формат ДД.ММ.ГГГГ (день.месяц.год)
   const dotTimeMatch = raw.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})\s+(\d{1,2}):(\d{1,2}):(\d{1,2})$/)
   if (dotTimeMatch) {
-    const [, part1, part2, yy, hh, min, ss] = dotTimeMatch
-    const num1 = Number(part1)
-    const num2 = Number(part2)
+    const [, dd, mm, yy, hh, min, ss] = dotTimeMatch
+    const day = Number(dd)
+    const month = Number(mm) - 1
     const year = yy.length === 2 ? Number(yy) + (Number(yy) > 70 ? 1900 : 2000) : Number(yy)
-    
-    // Автоопределение формата (аналогично формату без времени)
-    let day, month
-    if (num1 > 12) {
-      day = num1
-      month = num2 - 1
-    } else if (num2 > 12) {
-      day = num2
-      month = num1 - 1
-    } else {
-      // Стандарт для Казахстана: dd.mm.yyyy
-      day = num1
-      month = num2 - 1
-    }
     
     // Проверка валидности
     if (day < 1 || day > 31 || month < 0 || month > 11) {
@@ -957,31 +943,14 @@ const tryParseDate = (value) => {
     return Number.isNaN(date.getTime()) ? null : date
   }
   
-  // Формат без времени: dd.mm.yyyy или mm.dd.yyyy (автоопределение)
+  // Формат без времени: dd.mm.yyyy
+  // В выписках всегда используется формат ДД.ММ.ГГГГ (день.месяц.год)
   const dotMatch = raw.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})$/)
   if (dotMatch) {
-    const [, part1, part2, yy] = dotMatch
-    const num1 = Number(part1)
-    const num2 = Number(part2)
+    const [, dd, mm, yy] = dotMatch
+    const day = Number(dd)
+    const month = Number(mm) - 1
     const year = yy.length === 2 ? Number(yy) + (Number(yy) > 70 ? 1900 : 2000) : Number(yy)
-    
-    // Автоопределение формата: если первое число > 12, то это день (dd.mm.yyyy)
-    // Если второе число > 12, то это месяц (mm.dd.yyyy), значит первое - день
-    // Иначе если первое <= 12 и второе <= 12 - используем формат dd.mm.yyyy (стандарт для Казахстана)
-    let day, month
-    if (num1 > 12) {
-      // Первое число > 12, значит это день, второе - месяц (dd.mm.yyyy)
-      day = num1
-      month = num2 - 1
-    } else if (num2 > 12) {
-      // Второе число > 12, значит это день, первое - месяц (mm.dd.yyyy)
-      day = num2
-      month = num1 - 1
-    } else {
-      // Оба числа <= 12, используем формат dd.mm.yyyy (стандарт для Казахстана)
-      day = num1
-      month = num2 - 1
-    }
     
     // Проверка валидности дня и месяца
     if (day < 1 || day > 31 || month < 0 || month > 11) {

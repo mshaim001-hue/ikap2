@@ -6,6 +6,7 @@ import os
 import re
 import sys
 import tempfile
+import traceback
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Dict, Iterable, List, Optional
@@ -1052,7 +1053,7 @@ class PDFStatementProcessor:
                         continue
                     
                     _log_debug(f"[DEBUG] Начинаю обработку листа '{sheet_name}': {len(excel_df)} строк, {len(excel_df.columns)} колонок")
-                _log_debug(f"[DEBUG] Колонки: {list(excel_df.columns)}")
+                    _log_debug(f"[DEBUG] Колонки: {list(excel_df.columns)}")
                     
                     # Обрабатываем лист - ищем все повторяющиеся заголовки и разбиваем на секции
                     # Это важно для выписок, где на каждой странице PDF есть заголовки столбцов
@@ -1063,18 +1064,14 @@ class PDFStatementProcessor:
                     )
                     
                     for processed in processed_tables:
-                    if processed:
-                        tables.append(processed)
-                        import sys
+                        if processed:
+                            tables.append(processed)
                             print(f"[INFO] Извлечено {len(processed.rows)} строк с кредитом с листа '{sheet_name}'", file=sys.stderr, flush=True)
-                    else:
-                        import sys
+                        else:
                             print(f"[WARNING] Не удалось обработать часть листа '{sheet_name}': processed вернул None", file=sys.stderr, flush=True)
                             
                 except Exception as e:
-                    import sys
                     print(f"[ERROR] Ошибка при обработке листа '{sheet_name}': {e}", file=sys.stderr, flush=True)
-                    import traceback
                     print(f"[ERROR] Traceback: {traceback.format_exc()}", file=sys.stderr, flush=True)
                     # Продолжаем обработку остальных листов даже если один упал
                     continue
