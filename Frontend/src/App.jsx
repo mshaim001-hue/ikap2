@@ -813,7 +813,7 @@ function App() {
       return
     }
     if (!comment || comment.trim().length === 0) {
-      setSubmitError('Укажите важные данные')
+      window.alert('Укажите важные данные')
       return
     }
     setSubmitError('')
